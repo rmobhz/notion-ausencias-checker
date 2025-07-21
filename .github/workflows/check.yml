@@ -1,0 +1,28 @@
+name: Verificar conflitos Notion
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v3
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.x
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Rodar script
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
+          DATABASE_ID_AUSENCIAS: ${{ secrets.DATABASE_ID_AUSENCIAS }}
+        run: python notion_check.py
