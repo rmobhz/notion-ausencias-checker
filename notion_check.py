@@ -1,14 +1,15 @@
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
-NOTION_API_KEY = os.environ["NOTION_API_KEY"]
-DATABASE_ID_REUNIOES = os.environ["DATABASE_ID_REUNIOES"]
-DATABASE_ID_AUSENCIAS = os.environ["DATABASE_ID_AUSENCIAS"]
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
+DATABASE_ID_AUSENCIAS = os.getenv("DATABASE_ID_AUSENCIAS")
+
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
     "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
 }
 
 def fetch_database(database_id):
@@ -17,14 +18,16 @@ def fetch_database(database_id):
     response.raise_for_status()
     return response.json()["results"]
 
-def parse_date(date_obj):
-    if not date_obj:
-        return None, None
-    start = date_obj["start"]
-    end = date_obj["end"] or start
-    return datetime.fromisoformat(start), datetime.fromisoformat(end)
+def parse_data(prop_data):
+    if prop_data["type"] == "date":
+        date_info = prop_data["date"]
+        if date_info:
+            start = datetime.fromisoformat(date_info["start"])
+            end = datetime.fromisoformat(date_info.get("end") or date_info["start"])
+            return start.date(), end.date()
+    return None, None
 
-def check_overlap(start1, end1, start2, end2):
+def date_ranges_overlap(start1, end1, start2, end2):
     return start1 <= end2 and start2 <= end1
 
 def main():
@@ -34,54 +37,57 @@ def main():
     ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
 
     for reuniao in reunioes:
-        reuniao_id = reuniao["id"]
-        nome_reuniao = reuniao["properties"].get("Evento", {}).get("title", [])
-        data_reuniao_raw = reuniao["properties"].get("Data", {}).get("date")
-        participantes = reuniao["properties"].get("Participantes", {}).get("people", [])
+        evento_id = reuniao["id"]
+        props = reuniao["properties"]
+        data_reuniao = props.get("Data")
+        participantes = props.get("Participantes", {}).get("people", [])
+        titulo = props.get("Evento", {}).get("title", [])
+        titulo_texto = titulo[0]["text"]["content"] if titulo else "Sem título"
+        start_r, end_r = parse_data(data_reuniao)
 
-        if not data_reuniao_raw or not participantes or not nome_reuniao:
+        if not (start_r and participantes):
             continue
-
-        reuniao_inicio, reuniao_fim = parse_date(data_reuniao_raw)
-        nome_original = nome_reuniao[0]["plain_text"]
 
         servidores_em_conflito = []
 
         for ausencia in ausencias:
-            data_ausencia_raw = ausencia["properties"].get("Data", {}).get("date")
-            servidor = ausencia["properties"].get("Servidor", {}).get("people", [])
-            if not data_ausencia_raw or not servidor:
+            props_aus = ausencia["properties"]
+            data_aus = props_aus.get("Data")
+            servidor = props_aus.get("Servidor", {}).get("people", [])
+            start_a, end_a = parse_data(data_aus)
+
+            if not (start_a and servidor):
                 continue
 
-            ausencia_inicio, ausencia_fim = parse_date(data_ausencia_raw)
-            servidor_id = servidor[0]["id"]
-            servidor_nome = servidor[0]["name"]
+            servidor_info = servidor[0]
+            servidor_id = servidor_info["id"]
+            servidor_nome = servidor_info.get("name") or servidor_info.get("id", "Desconhecido")
 
-            # Se servidor está participando da reunião e tem ausência no mesmo período
             if any(p["id"] == servidor_id for p in participantes):
-                if check_overlap(reuniao_inicio, reuniao_fim, ausencia_inicio, ausencia_fim):
+                if date_ranges_overlap(start_r, end_r, start_a, end_a):
                     servidores_em_conflito.append(servidor_nome)
 
-        # Atualiza nome da reunião, se necessário
         if servidores_em_conflito:
-            conflito_nomes = ", ".join(servidores_em_conflito)
-            novo_nome = f"⚠️ {nome_original} ({conflito_nomes} ausentes)"
-        else:
-            novo_nome = nome_original
-
-        # Atualiza a página apenas se o nome estiver diferente
-        if nome_reuniao[0]["plain_text"] != novo_nome:
-            update_url = f"https://api.notion.com/v1/pages/{reuniao_id}"
+            novo_titulo = f"⚠️ {titulo_texto} – Conflito: {', '.join(servidores_em_conflito)}"
+            print(f"⚠️ Conflito encontrado em '{titulo_texto}': {servidores_em_conflito}")
+            update_url = f"https://api.notion.com/v1/pages/{evento_id}"
             update_data = {
                 "properties": {
                     "Evento": {
-                        "title": [{"text": {"content": novo_nome}}]
+                        "title": [
+                            {
+                                "text": {
+                                    "content": novo_titulo
+                                }
+                            }
+                        ]
                     }
                 }
             }
-            r = requests.patch(update_url, headers=HEADERS, json=update_data)
-            r.raise_for_status()
-            print(f"🔁 Reunião atualizada: {novo_nome}")
+            response = requests.patch(update_url, headers=HEADERS, json=update_data)
+            response.raise_for_status()
+        else:
+            print(f"✅ Sem conflito: {titulo_texto}")
 
 if __name__ == "__main__":
     main()
