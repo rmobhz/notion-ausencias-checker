@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
@@ -30,6 +30,24 @@ def parse_data(prop_data):
 def date_ranges_overlap(start1, end1, start2, end2):
     return start1 <= end2 and start2 <= end1
 
+def atualizar_titulo(evento_id, novo_titulo):
+    update_url = f"https://api.notion.com/v1/pages/{evento_id}"
+    update_data = {
+        "properties": {
+            "Evento": {
+                "title": [
+                    {
+                        "text": {
+                            "content": novo_titulo
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    response = requests.patch(update_url, headers=HEADERS, json=update_data)
+    response.raise_for_status()
+
 def main():
     print("🔄 Verificando conflitos entre reuniões e ausências...")
 
@@ -42,7 +60,8 @@ def main():
         data_reuniao = props.get("Data")
         participantes = props.get("Participantes", {}).get("people", [])
         titulo = props.get("Evento", {}).get("title", [])
-        titulo_texto = titulo[0]["text"]["content"] if titulo else "Sem título"
+        titulo_atual = titulo[0]["text"]["content"] if titulo else "Sem título"
+        titulo_original = titulo_atual.replace("⚠️ ", "").split(" – Conflito")[0]
         start_r, end_r = parse_data(data_reuniao)
 
         if not (start_r and participantes):
@@ -68,26 +87,16 @@ def main():
                     servidores_em_conflito.append(servidor_nome)
 
         if servidores_em_conflito:
-            novo_titulo = f"⚠️ {titulo_texto} – Conflito: {', '.join(servidores_em_conflito)}"
-            print(f"⚠️ Conflito encontrado em '{titulo_texto}': {servidores_em_conflito}")
-            update_url = f"https://api.notion.com/v1/pages/{evento_id}"
-            update_data = {
-                "properties": {
-                    "Evento": {
-                        "title": [
-                            {
-                                "text": {
-                                    "content": novo_titulo
-                                }
-                            }
-                        ]
-                    }
-                }
-            }
-            response = requests.patch(update_url, headers=HEADERS, json=update_data)
-            response.raise_for_status()
+            novo_titulo = f"⚠️ {titulo_original} – Conflito: {', '.join(servidores_em_conflito)}"
+            if titulo_atual != novo_titulo:
+                print(f"⚠️ Conflito em '{titulo_original}': {servidores_em_conflito}")
+                atualizar_titulo(evento_id, novo_titulo)
         else:
-            print(f"✅ Sem conflito: {titulo_texto}")
+            if titulo_atual.startswith("⚠️"):
+                print(f"✅ Conflito resolvido: restaurando nome original '{titulo_original}'")
+                atualizar_titulo(evento_id, titulo_original)
+            else:
+                print(f"✅ Sem conflito: {titulo_atual}")
 
 if __name__ == "__main__":
     main()
