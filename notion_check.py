@@ -61,14 +61,27 @@ def comentar_pagina_mencionando_usuario(page_id, user_id, texto_mensagem):
             }
         ]
     }
-    response = requests.post(url, headers=HEADERS, json=payload)
-    response.raise_for_status()
+    try:
+        response = requests.post(url, headers=HEADERS, json=payload)
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            print(f"⚠️ Sem permissão para criar comentários na página {page_id}. Comentário não será criado.")
+        else:
+            raise
 
 def listar_comentarios(page_id):
     url = f"https://api.notion.com/v1/comments?block_id={page_id}"
-    response = requests.get(url, headers=HEADERS)
-    response.raise_for_status()
-    return response.json().get("results", [])
+    try:
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        return response.json().get("results", [])
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            print(f"⚠️ Sem permissão para listar comentários na página {page_id}. Comentários serão ignorados.")
+            return []
+        else:
+            raise
 
 def main():
     print("🔄 Verificando conflitos entre reuniões e ausências...")
