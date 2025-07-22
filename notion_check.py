@@ -1,6 +1,7 @@
 import os
 import requests
 from datetime import datetime
+import re
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
@@ -29,6 +30,15 @@ def parse_data(prop_data):
 
 def date_ranges_overlap(start1, end1, start2, end2):
     return start1 <= end2 and start2 <= end1
+
+def extrair_nome_original(titulo):
+    # Remove prefixo "⚠️" e sufixos como "– Conflito: ..." ou "(Ausentes: ...)"
+    titulo = titulo.strip()
+    if titulo.startswith("⚠️"):
+        titulo = titulo[2:].strip()
+    titulo = re.sub(r"\s+[–-]\s+Conflito:.*$", "", titulo)
+    titulo = re.sub(r"\s+\(Ausentes:.*\)$", "", titulo)
+    return titulo.strip()
 
 def atualizar_titulo(evento_id, novo_titulo):
     update_url = f"https://api.notion.com/v1/pages/{evento_id}"
@@ -61,7 +71,7 @@ def main():
         participantes = props.get("Participantes", {}).get("people", [])
         titulo = props.get("Evento", {}).get("title", [])
         titulo_atual = titulo[0]["text"]["content"] if titulo else "Sem título"
-        titulo_original = titulo_atual.replace("⚠️ ", "").split(" – Conflito")[0]
+        titulo_original = extrair_nome_original(titulo_atual)
         start_r, end_r = parse_data(data_reuniao)
 
         if not (start_r and participantes):
@@ -87,7 +97,7 @@ def main():
                     servidores_em_conflito.append(servidor_nome)
 
         if servidores_em_conflito:
-            novo_titulo = f"⚠️ {titulo_original} – Conflito: {', '.join(servidores_em_conflito)}"
+            novo_titulo = f"⚠️ {titulo_original} (Ausentes: {', '.join(servidores_em_conflito)})"
             if titulo_atual != novo_titulo:
                 print(f"⚠️ Conflito em '{titulo_original}': {servidores_em_conflito}")
                 atualizar_titulo(evento_id, novo_titulo)
