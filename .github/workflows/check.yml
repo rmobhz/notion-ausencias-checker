@@ -1,28 +1,28 @@
-name: Verificar conflitos Notion
+name: Verificar Conflitos no Notion
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/5 * * * *"  # Executa a cada 5 minutos
+  workflow_dispatch:        # Permite execução manual pelo GitHub
 
 jobs:
-  run-script:
+  check-notion:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout do repositório
+      - name: Clonar repositório
         uses: actions/checkout@v3
 
       - name: Configurar Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.x
+          python-version: "3.10"
 
       - name: Instalar dependências
         run: pip install requests
 
-      - name: Rodar script
+      - name: Executar script
+        run: python notion_check.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
           DATABASE_ID_AUSENCIAS: ${{ secrets.DATABASE_ID_AUSENCIAS }}
-        run: python notion_check.py
