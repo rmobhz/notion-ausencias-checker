@@ -1,6 +1,7 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
+import re
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
@@ -27,6 +28,10 @@ def parse_date(date_obj):
 
 def date_ranges_overlap(start1, end1, start2, end2):
     return start1 <= end2 and end1 >= start2
+
+def limpar_titulo(titulo):
+    """Remove prefixo ⚠️ e sufixo (Ausentes: ...) ou (Ausências: ...)"""
+    return re.sub(r"^⚠️\s*|\s*\((Ausentes|Ausências):.*?\)", "", titulo).strip()
 
 def patch_database(page_id, campo, novo_titulo):
     url = f"https://api.notion.com/v1/pages/{page_id}"
@@ -78,23 +83,17 @@ def main():
                                     nomes_em_conflito.append(servidor_nome)
 
         if nomes_em_conflito:
-            if titulo_original.startswith("⚠️") and "(Ausentes:" in titulo_original:
-                titulo_corrigido = titulo_original.replace("(Ausentes:", "(Ausências:")
-                patch_database(reuniao_id, "Evento", titulo_corrigido)
-                print(f"✏️ Corrigido título: {titulo_corrigido}")
-            elif not titulo_original.startswith("⚠️") or "(Ausências:" not in titulo_original:
-                novo_titulo = f"⚠️ {titulo_original} (Ausências: {', '.join(nomes_em_conflito)})"
+            base_titulo = limpar_titulo(titulo_original)
+            novo_titulo = f"⚠️ {base_titulo} (Ausências: {', '.join(nomes_em_conflito)})"
+
+            if titulo_original != novo_titulo:
                 patch_database(reuniao_id, "Evento", novo_titulo)
                 print(f"⚠️ Conflito detectado: {novo_titulo}")
         else:
-            if titulo_original.startswith("⚠️"):
-                partes = titulo_original.split("⚠️")
-                if len(partes) > 1:
-                    possivel_titulo = partes[-1]
-                    if "(" in possivel_titulo:
-                        possivel_titulo = possivel_titulo.split(" (")[0].strip()
-                    patch_database(reuniao_id, "Evento", possivel_titulo)
-                    print(f"✅ Conflito resolvido: {possivel_titulo}")
+            if titulo_original.startswith("⚠️") or "(Ausências:" in titulo_original:
+                base_titulo = limpar_titulo(titulo_original)
+                patch_database(reuniao_id, "Evento", base_titulo)
+                print(f"✅ Conflito resolvido: {base_titulo}")
 
 if __name__ == "__main__":
     main()
