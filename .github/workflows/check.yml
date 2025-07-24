@@ -20,9 +20,12 @@ jobs:
       - name: Instalar dependências
         run: pip install requests
 
-      - name: Executar script
-        run: python notion_check.py
+      - name: Executar scripts de verificação
+        run: |
+          python notion_check.py
+          python notion_check_calendario.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
           DATABASE_ID_AUSENCIAS: ${{ secrets.DATABASE_ID_AUSENCIAS }}
+          DATABASE_ID_CALENDARIOEDITORIAL: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
