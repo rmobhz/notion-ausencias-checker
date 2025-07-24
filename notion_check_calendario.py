@@ -16,10 +16,8 @@ PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]
 DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
 
 STATUS_IGNORADOS = ["Publicação", "Monitoramente", "Arquivado", "Concluído"]
-STATUS_YOUTUBE_IGNORADOS = [
-    "não teve como publicar", "Concluído", "Não houve reunião",
-    "Não teve programa", "Concluído com edição"
-]
+STATUS_YOUTUBE_IGNORADOS = ["não teve como publicar", "Concluído", "Não houve reunião", 
+                           "Não teve programa", "Concluído com edição"]
 
 def fetch_database(database_id, page_size=100):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
@@ -76,11 +74,11 @@ def atualizar_titulo(post_id, titulo_original, nomes_conflito):
     response = requests.patch(url, headers=HEADERS, json=data)
     response.raise_for_status()
 
-def remover_alerta_titulo(post_id, titulo_atual):
-    if not titulo_atual.startswith("⚠️") and "Conflito:" not in titulo_atual:
+def remover_alerta_titulo(post_id, titulo_com_alerta):
+    if not titulo_com_alerta.startswith("⚠️"):
         return
     
-    titulo_limpo = titulo_atual.replace("⚠️", "").split(" (Conflito:")[0].strip()
+    titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
     
     url = f"https://api.notion.com/v1/pages/{post_id}"
     data = {
@@ -97,7 +95,7 @@ def deve_ignorar_post(props):
     status = props.get("Status", {}).get("select", {}).get("name", "")
     if status in STATUS_IGNORADOS:
         return True
-
+    
     status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")
     if status_yt in STATUS_YOUTUBE_IGNORADOS:
         return True
@@ -110,7 +108,7 @@ def main():
     posts = fetch_database(DATABASE_ID_CALENDARIO)
     print(f"✅ Encontrados {len(posts)} posts no calendário")
 
-    # 🧹 Remover todos os alertas antes de iniciar verificação
+    # 🧹 Remover todos os alertas antes de analisar
     print("🧹 Removendo alertas antigos de todos os posts...")
     for post in posts:
         props = post["properties"]
@@ -122,7 +120,7 @@ def main():
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
 
-        if titulo_atual.startswith("⚠️") or "Conflito:" in titulo_atual:
+        if titulo_atual.startswith("⚠️"):
             remover_alerta_titulo(post_id, titulo_atual)
             print(f"🔧 Alerta removido do título: {titulo_atual[:50]}...")
 
@@ -144,8 +142,12 @@ def main():
         post_id = post["id"]
         
         if deve_ignorar_post(props):
+            if titulo_atual.startswith("⚠️"):
+                remover_alerta_titulo(post_id, titulo_atual)
+                alertas_removidos += 1
+                print(f"✅ [STATUS IGNORADO] Alerta removido: {titulo_atual[:50]}...")
             continue
-
+        
         pessoas_envolvidas = []
         for campo in PESSOAS_ENVOLVIDAS:
             if campo in props and props[campo].get("people"):
@@ -167,14 +169,22 @@ def main():
         nomes_conflito = sorted(list(nomes_com_conflito))
 
         if nomes_conflito:
-            titulo_original = titulo_atual.replace("⚠️", "").split(" (Conflito:")[0].strip()
-            atualizar_titulo(post_id, titulo_original, nomes_conflito)
-            posts_com_alerta += 1
-            print(f"⚠️ [CONFLITO DETECTADO] {titulo_original[:50]}... → {', '.join(nomes_conflito)}")
+            if not titulo_atual.startswith("⚠️") or "Conflito:" not in titulo_atual:
+                titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
+                atualizar_titulo(post_id, titulo_original, nomes_conflito)
+                posts_com_alerta += 1
+                print(f"⚠️ [CONFLITO DETECTADO] {titulo_original[:50]}... → {', '.join(nomes_conflito)}")
+        else:
+            if titulo_atual.startswith("⚠️") and "Conflito:" in titulo_atual:
+                remover_alerta_titulo(post_id, titulo_atual)
+                alertas_removidos += 1
+                print(f"✅ [SEM CONFLITO] Alerta removido: {titulo_atual[:50]}...")
 
     print(f"\n🔍 Resumo da verificação:")
     print(f"• Posts analisados: {len(posts)}")
     print(f"• Alertas adicionados: {posts_com_alerta}")
+    print(f"• Alertas removidos: {alertas_removidos}")
+    print(f"• Posts com status ignorado: {alertas_removidos - posts_com_alerta if alertas_removidos > posts_com_alerta else 0}")
     print("✅ Verificação concluída!\n")
 
 if __name__ == "__main__":
