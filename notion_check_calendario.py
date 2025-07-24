@@ -12,8 +12,14 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-PESSOAS_ENVOLVIDAS = ["Responsável", "Apoio", "Editor(a) imagem/vídeo"]
+# Modificado: Removido "Apoio" conforme solicitado
+PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]
 DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
+
+# Status que devem ser ignorados para verificação de conflitos
+STATUS_IGNORADOS = ["Publicação", "Monitoramente", "Arquivado", "Concluído"]
+STATUS_YOUTUBE_IGNORADOS = ["não teve como publicar", "Concluído", "Não houve reunião", 
+                           "Não teve programa", "Concluído com edição"]
 
 def fetch_database(database_id, page_size=100):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
@@ -87,6 +93,19 @@ def remover_alerta_titulo(post_id, titulo_com_alerta):
     response = requests.patch(url, headers=HEADERS, json=data)
     response.raise_for_status()
 
+def deve_ignorar_post(props):
+    # Verifica status principal
+    status = props.get("Status", {}).get("select", {}).get("name", "")
+    if status in STATUS_IGNORADOS:
+        return True
+    
+    # Verifica status do YouTube
+    status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")
+    if status_yt in STATUS_YOUTUBE_IGNORADOS:
+        return True
+    
+    return False
+
 def main():
     print("🔄 Verificando conflitos no Calendário Editorial...")
 
@@ -95,6 +114,15 @@ def main():
 
     for post in posts:
         props = post["properties"]
+        
+        # Verifica se o post deve ser ignorado com base no status
+        if deve_ignorar_post(props):
+            titulo_raw = props["Título"]["title"]
+            if titulo_raw and titulo_raw[0]["text"]["content"].startswith("⚠️"):
+                remover_alerta_titulo(post["id"], titulo_raw[0]["text"]["content"])
+                print(f"✅ Post com status ignorável teve alerta removido: {titulo_raw[0]['text']['content']}")
+            continue
+
         titulo_raw = props["Título"]["title"]
         if not titulo_raw:
             continue
