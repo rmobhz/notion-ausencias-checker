@@ -12,8 +12,7 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Modificado: Removido "Apoio" conforme solicitado
-PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]
+PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]  # Removido "Apoio"
 DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
 
 # Status que devem ser ignorados para verificação de conflitos
@@ -114,32 +113,31 @@ def main():
 
     for post in posts:
         props = post["properties"]
+        titulo_raw = props.get("Título", {}).get("title", [])
         
-        # Verifica se o post deve ser ignorado com base no status
-        if deve_ignorar_post(props):
-            titulo_raw = props["Título"]["title"]
-            if titulo_raw and titulo_raw[0]["text"]["content"].startswith("⚠️"):
-                remover_alerta_titulo(post["id"], titulo_raw[0]["text"]["content"])
-                print(f"✅ Post com status ignorável teve alerta removido: {titulo_raw[0]['text']['content']}")
-            continue
-
-        titulo_raw = props["Título"]["title"]
         if not titulo_raw:
             continue
-
+            
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
+        
+        # Primeiro verifica se o post deve ser ignorado e remove alerta se existir
+        if deve_ignorar_post(props):
+            if titulo_atual.startswith("⚠️"):
+                remover_alerta_titulo(post_id, titulo_atual)
+                print(f"✅ Alerta removido de post com status ignorável: {titulo_atual}")
+            continue  # Pula para o próximo post
+        
+        # Se não for ignorado, prossegue com a verificação de conflitos
         pessoas_envolvidas = []
-
         for campo in PESSOAS_ENVOLVIDAS:
-            if campo in props and props[campo]["people"]:
+            if campo in props and props[campo].get("people"):
                 for pessoa in props[campo]["people"]:
                     pessoas_envolvidas.append((pessoa["id"], pessoa.get("name", "Desconhecido")))
 
         nomes_com_conflito = set()
-
         for campo_data in DATAS_DE_VEICULACAO:
-            if campo_data in props and props[campo_data]["date"]:
+            if campo_data in props and props[campo_data].get("date"):
                 data_veiculacao = parse_date(props[campo_data]["date"])
                 if data_veiculacao:
                     margem_inicio = data_veiculacao - timedelta(days=3)
