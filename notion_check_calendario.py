@@ -109,8 +109,17 @@ def main():
                     margem_fim = data_veiculacao
 
                     for pessoa_id, pessoa_nome in pessoas_envolvidas:
+                        if pessoa_nome == "Fernanda Domingos":
+                            print(f"\n👤 Verificando Fernanda Domingos no post: {titulo_atual}")
+                            print(f"📅 Data de veiculação: {data_veiculacao.date()} (margem de {margem_inicio.date()} até {margem_fim.date()})")
+
                         if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
+                            if pessoa_nome == "Fernanda Domingos":
+                                print("⚠️ AUSÊNCIA DETECTADA!")
                             nomes_com_ausencia.add(pessoa_nome)
+                        else:
+                            if pessoa_nome == "Fernanda Domingos":
+                                print("✅ Nenhuma ausência nessa margem.")
 
         nomes_ausentes = sorted(list(nomes_com_ausencia))
 
