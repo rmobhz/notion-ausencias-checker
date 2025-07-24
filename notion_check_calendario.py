@@ -107,7 +107,23 @@ def main():
     print("⏳ Buscando posts no calendário editorial...")
     posts = fetch_database(DATABASE_ID_CALENDARIO)
     print(f"✅ Encontrados {len(posts)} posts no calendário")
-    
+
+    # 🧹 Remover todos os alertas antes de analisar
+    print("🧹 Removendo alertas antigos de todos os posts...")
+    for post in posts:
+        props = post["properties"]
+        titulo_raw = props.get("Título", {}).get("title", [{}])
+
+        if not titulo_raw or not titulo_raw[0].get("text", {}).get("content"):
+            continue
+
+        titulo_atual = titulo_raw[0]["text"]["content"]
+        post_id = post["id"]
+
+        if titulo_atual.startswith("⚠️"):
+            remover_alerta_titulo(post_id, titulo_atual)
+            print(f"🔧 Alerta removido do título: {titulo_atual[:50]}...")
+
     print("⏳ Buscando ausências registradas...")
     ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
     print(f"✅ Encontradas {len(ausencias)} ausências\n")
