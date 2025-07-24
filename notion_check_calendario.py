@@ -76,6 +76,8 @@ def main():
 
     for post in posts:
         props = post["properties"]
+        print("Campos disponíveis:", list(props.keys()))
+        break
         titulo_raw = props["Título"]["title"]
         if not titulo_raw:
             continue
