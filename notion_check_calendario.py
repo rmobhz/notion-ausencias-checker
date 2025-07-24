@@ -36,9 +36,6 @@ def fetch_database(database_id, page_size=100):
         all_results.extend(data["results"])
         has_more = data.get("has_more", False)
         start_cursor = data.get("next_cursor")
-        
-        # Opcional: delay para evitar rate limiting
-        # time.sleep(0.1)
     
     return all_results
 
@@ -74,17 +71,10 @@ def atualizar_titulo(post_id, titulo_original, nomes_conflito):
     response.raise_for_status()
 
 def remover_alerta_titulo(post_id, titulo_com_alerta):
-    # Remove prefixo e sufixo - agora tratando tanto "Ausências:" quanto "Conflito:"
     if not titulo_com_alerta.startswith("⚠️"):
         return
     
-    # Trata títulos com o padrão antigo ("Ausências:") ou novo ("Conflito:")
-    if "(Ausências:" in titulo_com_alerta:
-        titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
-    elif "(Conflito:" in titulo_com_alerta:
-        titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
-    else:
-        titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (")[0].strip()
+    titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
     
     url = f"https://api.notion.com/v1/pages/{post_id}"
     data = {
@@ -96,29 +86,6 @@ def remover_alerta_titulo(post_id, titulo_com_alerta):
     }
     response = requests.patch(url, headers=HEADERS, json=data)
     response.raise_for_status()
-
-def migrar_titulos_antigos(post_id, titulo_atual):
-    """Atualiza títulos com o padrão antigo ('Ausências:') para o novo padrão ('Conflito:')"""
-    if "(Ausências:" in titulo_atual:
-        # Extrai os nomes do padrão antigo
-        partes = titulo_atual.split("(Ausências: ")
-        if len(partes) > 1:
-            titulo_base = partes[0].replace("⚠️ ", "").strip()
-            nomes = partes[1].rstrip(")").strip()
-            # Recria o título com o novo padrão
-            novo_titulo = f"⚠️ {titulo_base} (Conflito: {nomes})"
-            
-            url = f"https://api.notion.com/v1/pages/{post_id}"
-            data = {
-                "properties": {
-                    "Título": {
-                        "title": [{"text": {"content": novo_titulo}}]
-                    }
-                }
-            }
-            response = requests.patch(url, headers=HEADERS, json=data)
-            response.raise_for_status()
-            print(f"🔄 Título migrado de 'Ausências' para 'Conflito': {titulo_atual} → {novo_titulo}")
 
 def main():
     print("🔄 Verificando conflitos no Calendário Editorial...")
@@ -134,13 +101,6 @@ def main():
 
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
-        
-        # Primeiro, verifica e migra títulos com o padrão antigo
-        if "(Ausências:" in titulo_atual:
-            migrar_titulos_antigos(post_id, titulo_atual)
-            # Atualiza o título atual após migração
-            titulo_atual = titulo_atual.replace("(Ausências:", "(Conflito:")
-        
         pessoas_envolvidas = []
 
         for campo in PESSOAS_ENVOLVIDAS:
@@ -167,12 +127,10 @@ def main():
         if nomes_conflito:
             if not titulo_atual.startswith("⚠️") or "Conflito:" not in titulo_atual:
                 titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
-                if "(Ausências:" in titulo_original:  # Caso extra de migração
-                    titulo_original = titulo_original.split(" (Ausências:")[0].strip()
                 atualizar_titulo(post_id, titulo_original, nomes_conflito)
                 print(f"⚠️ Conflito detectado no post: {titulo_original} – {', '.join(nomes_conflito)}")
         else:
-            if titulo_atual.startswith("⚠️") and ("Conflito:" in titulo_atual or "Ausências:" in titulo_atual):
+            if titulo_atual.startswith("⚠️") and "Conflito:" in titulo_atual:
                 remover_alerta_titulo(post_id, titulo_atual)
                 print(f"✅ Alerta removido do post: {titulo_atual}")
 
