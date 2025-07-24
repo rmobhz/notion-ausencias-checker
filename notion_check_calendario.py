@@ -92,12 +92,10 @@ def remover_alerta_titulo(post_id, titulo_com_alerta):
     response.raise_for_status()
 
 def deve_ignorar_post(props):
-    # Verifica status principal
     status = props.get("Status", {}).get("select", {}).get("name", "")
     if status in STATUS_IGNORADOS:
         return True
     
-    # Verifica status do YouTube
     status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")
     if status_yt in STATUS_YOUTUBE_IGNORADOS:
         return True
@@ -127,15 +125,13 @@ def main():
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
         
-        # Verificação prioritária de status ignorados
         if deve_ignorar_post(props):
             if titulo_atual.startswith("⚠️"):
                 remover_alerta_titulo(post_id, titulo_atual)
                 alertas_removidos += 1
                 print(f"✅ [STATUS IGNORADO] Alerta removido: {titulo_atual[:50]}...")
-            continue  # Pula para o próximo post
+            continue
         
-        # Verificação de conflitos para posts não ignorados
         pessoas_envolvidas = []
         for campo in PESSOAS_ENVOLVIDAS:
             if campo in props and props[campo].get("people"):
@@ -156,7 +152,6 @@ def main():
 
         nomes_conflito = sorted(list(nomes_com_conflito))
 
-        # Atualiza ou remove alerta no título conforme necessário
         if nomes_conflito:
             if not titulo_atual.startswith("⚠️") or "Conflito:" not in titulo_atual:
                 titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
