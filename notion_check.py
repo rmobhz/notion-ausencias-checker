@@ -13,11 +13,29 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-def fetch_database(database_id):
+def fetch_database(database_id, page_size=100):
+    """Busca todos os registros de um banco de dados com paginação"""
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    response = requests.post(url, headers=HEADERS)
-    response.raise_for_status()
-    return response.json()["results"]
+    all_results = []
+    start_cursor = None
+    
+    while True:
+        payload = {"page_size": page_size}
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+            
+        response = requests.post(url, headers=HEADERS, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        all_results.extend(data["results"])
+        
+        if not data.get("has_more"):
+            break
+            
+        start_cursor = data.get("next_cursor")
+    
+    return all_results
 
 def parse_date(date_obj):
     if not date_obj:
@@ -54,8 +72,13 @@ def patch_database(page_id, campo, novo_titulo):
 def main():
     print("🔄 Verificando conflitos entre reuniões e ausências...")
 
+    print("⏳ Buscando reuniões...")
     reunioes = fetch_database(DATABASE_ID_REUNIOES)
+    print(f"✅ Encontradas {len(reunioes)} reuniões")
+    
+    print("⏳ Buscando ausências...")
     ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
+    print(f"✅ Encontradas {len(ausencias)} ausências")
 
     for reuniao in reunioes:
         props = reuniao["properties"]
