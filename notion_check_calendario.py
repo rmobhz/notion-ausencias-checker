@@ -1,146 +1,119 @@
-import requests
-import datetime
-import pytz
 import os
+import requests
+from datetime import datetime, timedelta
 
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-DATABASE_ID = os.getenv("DATABASE_ID_CALENDARIOEDITORIAL")
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+DATABASE_ID_CALENDARIO = os.getenv("DATABASE_ID_CALENDARIOEDITORIAL")
+DATABASE_ID_AUSENCIAS = os.getenv("DATABASE_ID_AUSENCIAS")
 
-headers = {
-    "Authorization": f"Bearer {NOTION_TOKEN}",
+HEADERS = {
+    "Authorization": f"Bearer {NOTION_API_KEY}",
+    "Notion-Version": "2022-06-28",
     "Content-Type": "application/json",
-    "Notion-Version": "2022-06-28"
 }
 
-# Pessoas a verificar
-pessoas_para_verificar = ["Fernanda Domingos"]
+PESSOAS_ENVOLVIDAS = ["Responsável", "Apoio", "Editor(a) imagem/vídeo"]
+DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
 
-def fetch_database_pages(database_id, headers, filtro):
+def fetch_database(database_id):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    all_results = []
-    payload = {
-        "filter": filtro,
-        "page_size": 100
-    }
-
-    has_more = True
-    start_cursor = None
-
-    while has_more:
-        if start_cursor:
-            payload["start_cursor"] = start_cursor
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        all_results.extend(data["results"])
-        has_more = data.get("has_more", False)
-        start_cursor = data.get("next_cursor", None)
-
-    return all_results
-
-def fetch_ausencias(headers, pessoa, data_post):
-    url = "https://api.notion.com/v1/databases"
-    filtro = {
-        "and": [
-            {
-                "property": "Pessoa",
-                "people": {
-                    "contains": pessoa
-                }
-            },
-            {
-                "property": "Início",
-                "date": {
-                    "on_or_before": data_post
-                }
-            },
-            {
-                "property": "Fim",
-                "date": {
-                    "on_or_after": data_post
-                }
-            }
-        ]
-    }
-    payload = {
-        "filter": filtro
-    }
-    response = requests.post(f"{url}/{os.getenv('DATABASE_ID_AUSENCIAS')}/query", headers=headers, json=payload)
+    response = requests.post(url, headers=HEADERS)
     response.raise_for_status()
-    return response.json().get("results", [])
+    return response.json()["results"]
 
-def get_property(page, nome_campo):
-    props = page["properties"].get(nome_campo)
-    if not props:
+def parse_date(date_obj):
+    if not date_obj:
         return None
-    tipo = props["type"]
-    if tipo == "title":
-        return props["title"][0]["plain_text"] if props["title"] else None
-    elif tipo == "date":
-        return props["date"]["start"] if props["date"] else None
-    elif tipo == "people":
-        return [p["name"] for p in props["people"]]
-    return None
+    return datetime.fromisoformat(date_obj["start"][:10])
 
-def verificar_conflitos():
+def verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
+    for ausencia in ausencias:
+        props = ausencia["properties"]
+        if props["Servidor"]["people"]:
+            if props["Servidor"]["people"][0]["id"] == pessoa_id:
+                data_ausencia = props["Data"].get("date")
+                if data_ausencia:
+                    aus_start = parse_date(data_ausencia)
+                    aus_end = parse_date({"start": data_ausencia["end"]}) if data_ausencia.get("end") else aus_start
+                    if aus_start <= margem_fim and aus_end >= margem_inicio:
+                        return True
+    return False
+
+def atualizar_titulo(post_id, titulo_original, nomes_ausentes):
+    novo_titulo = f"⚠️ {titulo_original} (Ausências: {', '.join(nomes_ausentes)})"
+    url = f"https://api.notion.com/v1/pages/{post_id}"
+    data = {
+        "properties": {
+            "Título": {
+                "title": [{"text": {"content": novo_titulo}}]
+            }
+        }
+    }
+    response = requests.patch(url, headers=HEADERS, json=data)
+    response.raise_for_status()
+
+def remover_alerta_titulo(post_id, titulo_com_alerta):
+    # Remove prefixo e sufixo
+    if not titulo_com_alerta.startswith("⚠️"):
+        return
+    titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
+    url = f"https://api.notion.com/v1/pages/{post_id}"
+    data = {
+        "properties": {
+            "Título": {
+                "title": [{"text": {"content": titulo_limpo}}]
+            }
+        }
+    }
+    response = requests.patch(url, headers=HEADERS, json=data)
+    response.raise_for_status()
+
+def main():
     print("🔄 Verificando ausências no Calendário Editorial...")
 
-    filtro = {
-        "or": [
-            {"property": "Veiculação", "date": {"is_not_empty": True}},
-            {"property": "Veiculação - YouTube", "date": {"is_not_empty": True}},
-            {"property": "Veiculação - TikTok", "date": {"is_not_empty": True}},
-        ]
-    }
-
-    posts = fetch_database_pages(DATABASE_ID, headers, filtro)
-    print(f"📄 Total de posts retornados: {len(posts)}")
+    posts = fetch_database(DATABASE_ID_CALENDARIO)
+    ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
 
     for post in posts:
-        titulo = get_property(post, "Título")
-        print(f"🔍 Post encontrado: {titulo}")
+        props = post["properties"]
+        titulo_raw = props["Título"]["title"]
+        if not titulo_raw:
+            continue
 
-        campos_datas = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
-        campos_pessoas = ["Responsável", "Apoio", "Editor(a) imagem/vídeo"]
+        titulo_atual = titulo_raw[0]["text"]["content"]
+        post_id = post["id"]
+        pessoas_envolvidas = []
 
-        for campo_data in campos_datas:
-            data_str = get_property(post, campo_data)
-            if not data_str:
-                continue
+        for campo in PESSOAS_ENVOLVIDAS:
+            if campo in props and props[campo]["people"]:
+                for pessoa in props[campo]["people"]:
+                    pessoas_envolvidas.append((pessoa["id"], pessoa.get("name", "Desconhecido")))
 
-            # Converte string para data
-            data_post = datetime.datetime.fromisoformat(data_str).astimezone(pytz.timezone("America/Sao_Paulo")).date()
+        nomes_com_ausencia = set()
 
-            # Aplica margem de 3 dias antes
-            margem_inicio = data_post - datetime.timedelta(days=3)
-            margem_fim = data_post
+        for campo_data in DATAS_DE_VEICULACAO:
+            if campo_data in props and props[campo_data]["date"]:
+                data_veiculacao = parse_date(props[campo_data]["date"])
+                if data_veiculacao:
+                    margem_inicio = data_veiculacao - timedelta(days=3)
+                    margem_fim = data_veiculacao
 
-            for campo_pessoa in campos_pessoas:
-                pessoas = get_property(post, campo_pessoa)
-                if not pessoas:
-                    continue
+                    for pessoa_id, pessoa_nome in pessoas_envolvidas:
+                        if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
+                            nomes_com_ausencia.add(pessoa_nome)
 
-                for pessoa in pessoas:
-                    if pessoa not in pessoas_para_verificar:
-                        continue
+        nomes_ausentes = sorted(list(nomes_com_ausencia))
 
-                    print(f"👤 Verificando {pessoa} no post: {titulo}")
-                    print(f"📅 Data de veiculação: {data_post} (margem de {margem_inicio} até {margem_fim})")
-
-                    data_cursor = margem_inicio
-                    conflito_encontrado = False
-
-                    while data_cursor <= margem_fim:
-                        ausencias = fetch_ausencias(headers, pessoa, data_cursor.isoformat())
-                        if ausencias:
-                            print(f"⚠️ Conflito encontrado para {pessoa} no dia {data_cursor} no post: {titulo}")
-                            conflito_encontrado = True
-                            break
-                        data_cursor += datetime.timedelta(days=1)
-
-                    if not conflito_encontrado:
-                        print(f"✅ Nenhuma ausência nessa margem.")
+        # Atualiza ou remove alerta no título conforme necessário
+        if nomes_ausentes:
+            if not titulo_atual.startswith("⚠️") or "Ausências:" not in titulo_atual:
+                titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
+                atualizar_titulo(post_id, titulo_original, nomes_ausentes)
+                print(f"⚠️ Ausências detectadas no post: {titulo_original} – {', '.join(nomes_ausentes)}")
+        else:
+            if titulo_atual.startswith("⚠️") and "Ausências:" in titulo_atual:
+                remover_alerta_titulo(post_id, titulo_atual)
+                print(f"✅ Alerta removido do post: {titulo_atual}")
 
 if __name__ == "__main__":
-    print("🔎 Verificando conflitos entre reuniões e ausências...")
-    verificar_conflitos()
+    main()
