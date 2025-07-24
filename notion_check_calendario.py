@@ -26,7 +26,7 @@ def parse_date(date_obj):
         return None
     return datetime.fromisoformat(date_obj["start"][:10])
 
-def verificar_ausencia(pessoa_id, ausencias, margem_inicio, margem_fim):
+def verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
     for ausencia in ausencias:
         props = ausencia["properties"]
         if props["Servidor"]["people"]:
@@ -39,6 +39,35 @@ def verificar_ausencia(pessoa_id, ausencias, margem_inicio, margem_fim):
                         return True
     return False
 
+def atualizar_titulo(post_id, titulo_original, nomes_ausentes):
+    novo_titulo = f"⚠️ {titulo_original} (Ausências: {', '.join(nomes_ausentes)})"
+    url = f"https://api.notion.com/v1/pages/{post_id}"
+    data = {
+        "properties": {
+            "Nome": {
+                "title": [{"text": {"content": novo_titulo}}]
+            }
+        }
+    }
+    response = requests.patch(url, headers=HEADERS, json=data)
+    response.raise_for_status()
+
+def remover_alerta_titulo(post_id, titulo_com_alerta):
+    # Remove prefixo e sufixo
+    if not titulo_com_alerta.startswith("⚠️"):
+        return
+    titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
+    url = f"https://api.notion.com/v1/pages/{post_id}"
+    data = {
+        "properties": {
+            "Nome": {
+                "title": [{"text": {"content": titulo_limpo}}]
+            }
+        }
+    }
+    response = requests.patch(url, headers=HEADERS, json=data)
+    response.raise_for_status()
+
 def main():
     print("🔄 Verificando ausências no Calendário Editorial...")
 
@@ -47,7 +76,11 @@ def main():
 
     for post in posts:
         props = post["properties"]
-        titulo = props["Nome"]["title"][0]["text"]["content"] if props["Nome"]["title"] else "Sem título"
+        titulo_raw = props["Nome"]["title"]
+        if not titulo_raw:
+            continue
+
+        titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
         pessoas_envolvidas = []
 
@@ -55,6 +88,8 @@ def main():
             if campo in props and props[campo]["people"]:
                 for pessoa in props[campo]["people"]:
                     pessoas_envolvidas.append((pessoa["id"], pessoa.get("name", "Desconhecido")))
+
+        nomes_com_ausencia = set()
 
         for campo_data in DATAS_DE_VEICULACAO:
             if campo_data in props and props[campo_data]["date"]:
@@ -64,9 +99,21 @@ def main():
                     margem_fim = data_veiculacao
 
                     for pessoa_id, pessoa_nome in pessoas_envolvidas:
-                        if verificar_ausencia(pessoa_id, ausencias, margem_inicio, margem_fim):
-                            print(f"⚠️ {titulo} – {pessoa_nome} estará ausente antes de {campo_data.lower()} ({data_veiculacao.date()})")
-                            break  # Opcional: parar após primeira ausência detectada para essa data
+                        if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
+                            nomes_com_ausencia.add(pessoa_nome)
+
+        nomes_ausentes = sorted(list(nomes_com_ausencia))
+
+        # Atualiza ou remove alerta no título conforme necessário
+        if nomes_ausentes:
+            if not titulo_atual.startswith("⚠️") or "Ausências:" not in titulo_atual:
+                titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
+                atualizar_titulo(post_id, titulo_original, nomes_ausentes)
+                print(f"⚠️ Ausências detectadas no post: {titulo_original} – {', '.join(nomes_ausentes)}")
+        else:
+            if titulo_atual.startswith("⚠️") and "Ausências:" in titulo_atual:
+                remover_alerta_titulo(post_id, titulo_atual)
+                print(f"✅ Alerta removido do post: {titulo_atual}")
 
 if __name__ == "__main__":
     main()
