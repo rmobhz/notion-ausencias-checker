@@ -44,7 +44,7 @@ def atualizar_titulo(post_id, titulo_original, nomes_ausentes):
     url = f"https://api.notion.com/v1/pages/{post_id}"
     data = {
         "properties": {
-            "Nome": {
+            "Título": {
                 "title": [{"text": {"content": novo_titulo}}]
             }
         }
@@ -60,7 +60,7 @@ def remover_alerta_titulo(post_id, titulo_com_alerta):
     url = f"https://api.notion.com/v1/pages/{post_id}"
     data = {
         "properties": {
-            "Nome": {
+            "Título": {
                 "title": [{"text": {"content": titulo_limpo}}]
             }
         }
