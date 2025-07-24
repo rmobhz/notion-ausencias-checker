@@ -15,11 +15,32 @@ HEADERS = {
 PESSOAS_ENVOLVIDAS = ["Responsável", "Apoio", "Editor(a) imagem/vídeo"]
 DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
 
-def fetch_database(database_id):
+def fetch_database(database_id, page_size=100):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    response = requests.post(url, headers=HEADERS)
-    response.raise_for_status()
-    return response.json()["results"]
+    all_results = []
+    has_more = True
+    start_cursor = None
+    
+    while has_more:
+        payload = {
+            "page_size": page_size
+        }
+        
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+        
+        response = requests.post(url, headers=HEADERS, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        all_results.extend(data["results"])
+        has_more = data.get("has_more", False)
+        start_cursor = data.get("next_cursor")
+        
+        # Opcional: delay para evitar rate limiting
+        # time.sleep(0.1)
+    
+    return all_results
 
 def parse_date(date_obj):
     if not date_obj:
