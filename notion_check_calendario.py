@@ -78,6 +78,11 @@ def main():
 
     try:
         posts = fetch_database(DATABASE_ID_CALENDARIO)
+        print(f"📄 Total de posts retornados: {len(posts)}")
+        for post in posts:
+            titulo_raw = post["properties"].get("Título", {}).get("title", [])
+            titulo_texto = titulo_raw[0]["text"]["content"] if titulo_raw else "(sem título)"
+            print(f"🔍 Post encontrado: {titulo_texto}")
         ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
     except Exception as e:
         print(f"❌ Erro ao buscar dados do Notion: {e}")
