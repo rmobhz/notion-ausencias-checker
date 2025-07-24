@@ -76,7 +76,7 @@ def main():
 
     for post in posts:
         props = post["properties"]
-        titulo_raw = props["Nome"]["title"]
+        titulo_raw = props["Título"]["title"]
         if not titulo_raw:
             continue
 
