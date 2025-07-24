@@ -49,11 +49,13 @@ def atualizar_titulo(post_id, titulo_original, nomes_ausentes):
             }
         }
     }
-    response = requests.patch(url, headers=HEADERS, json=data)
-    response.raise_for_status()
+    try:
+        response = requests.patch(url, headers=HEADERS, json=data)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Erro ao atualizar título para '{novo_titulo}': {e}")
 
 def remover_alerta_titulo(post_id, titulo_com_alerta):
-    # Remove prefixo e sufixo
     if not titulo_com_alerta.startswith("⚠️"):
         return
     titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
@@ -65,19 +67,24 @@ def remover_alerta_titulo(post_id, titulo_com_alerta):
             }
         }
     }
-    response = requests.patch(url, headers=HEADERS, json=data)
-    response.raise_for_status()
+    try:
+        response = requests.patch(url, headers=HEADERS, json=data)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Erro ao remover alerta do título '{titulo_com_alerta}': {e}")
 
 def main():
     print("🔄 Verificando ausências no Calendário Editorial...")
 
-    posts = fetch_database(DATABASE_ID_CALENDARIO)
-    ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
+    try:
+        posts = fetch_database(DATABASE_ID_CALENDARIO)
+        ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
+    except Exception as e:
+        print(f"❌ Erro ao buscar dados do Notion: {e}")
+        return
 
     for post in posts:
         props = post["properties"]
-        print("Campos disponíveis:", list(props.keys()))
-        break
         titulo_raw = props["Título"]["title"]
         if not titulo_raw:
             continue
@@ -94,8 +101,9 @@ def main():
         nomes_com_ausencia = set()
 
         for campo_data in DATAS_DE_VEICULACAO:
-            if campo_data in props and props[campo_data]["date"]:
-                data_veiculacao = parse_date(props[campo_data]["date"])
+            data_obj = props.get(campo_data, {}).get("date")
+            if data_obj:
+                data_veiculacao = parse_date(data_obj)
                 if data_veiculacao:
                     margem_inicio = data_veiculacao - timedelta(days=3)
                     margem_fim = data_veiculacao
@@ -106,7 +114,6 @@ def main():
 
         nomes_ausentes = sorted(list(nomes_com_ausencia))
 
-        # Atualiza ou remove alerta no título conforme necessário
         if nomes_ausentes:
             if not titulo_atual.startswith("⚠️") or "Ausências:" not in titulo_atual:
                 titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Ausências:")[0].strip()
