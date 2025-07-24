@@ -12,10 +12,9 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]  # Removido "Apoio"
+PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]
 DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
 
-# Status que devem ser ignorados para verificação de conflitos
 STATUS_IGNORADOS = ["Publicação", "Monitoramente", "Arquivado", "Concluído"]
 STATUS_YOUTUBE_IGNORADOS = ["não teve como publicar", "Concluído", "Não houve reunião", 
                            "Não teve programa", "Concluído com edição"]
@@ -106,29 +105,37 @@ def deve_ignorar_post(props):
     return False
 
 def main():
-    print("🔄 Verificando conflitos no Calendário Editorial...")
-
+    print("\n🔄 Verificando conflitos no Calendário Editorial...")
+    print("⏳ Buscando posts no calendário editorial...")
     posts = fetch_database(DATABASE_ID_CALENDARIO)
+    print(f"✅ Encontrados {len(posts)} posts no calendário")
+    
+    print("⏳ Buscando ausências registradas...")
     ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
+    print(f"✅ Encontradas {len(ausencias)} ausências\n")
+
+    posts_com_alerta = 0
+    alertas_removidos = 0
 
     for post in posts:
         props = post["properties"]
-        titulo_raw = props.get("Título", {}).get("title", [])
+        titulo_raw = props.get("Título", {}).get("title", [{}])
         
-        if not titulo_raw:
+        if not titulo_raw or not titulo_raw[0].get("text", {}).get("content"):
             continue
             
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
         
-        # Primeiro verifica se o post deve ser ignorado e remove alerta se existir
+        # Verificação prioritária de status ignorados
         if deve_ignorar_post(props):
             if titulo_atual.startswith("⚠️"):
                 remover_alerta_titulo(post_id, titulo_atual)
-                print(f"✅ Alerta removido de post com status ignorável: {titulo_atual}")
+                alertas_removidos += 1
+                print(f"✅ [STATUS IGNORADO] Alerta removido: {titulo_atual[:50]}...")
             continue  # Pula para o próximo post
         
-        # Se não for ignorado, prossegue com a verificação de conflitos
+        # Verificação de conflitos para posts não ignorados
         pessoas_envolvidas = []
         for campo in PESSOAS_ENVOLVIDAS:
             if campo in props and props[campo].get("people"):
@@ -154,11 +161,20 @@ def main():
             if not titulo_atual.startswith("⚠️") or "Conflito:" not in titulo_atual:
                 titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
                 atualizar_titulo(post_id, titulo_original, nomes_conflito)
-                print(f"⚠️ Conflito detectado no post: {titulo_original} – {', '.join(nomes_conflito)}")
+                posts_com_alerta += 1
+                print(f"⚠️ [CONFLITO DETECTADO] {titulo_original[:50]}... → {', '.join(nomes_conflito)}")
         else:
             if titulo_atual.startswith("⚠️") and "Conflito:" in titulo_atual:
                 remover_alerta_titulo(post_id, titulo_atual)
-                print(f"✅ Alerta removido do post: {titulo_atual}")
+                alertas_removidos += 1
+                print(f"✅ [SEM CONFLITO] Alerta removido: {titulo_atual[:50]}...")
+
+    print(f"\n🔍 Resumo da verificação:")
+    print(f"• Posts analisados: {len(posts)}")
+    print(f"• Alertas adicionados: {posts_com_alerta}")
+    print(f"• Alertas removidos: {alertas_removidos}")
+    print(f"• Posts com status ignorado: {alertas_removidos - posts_com_alerta if alertas_removidos > posts_com_alerta else 0}")
+    print("✅ Verificação concluída!\n")
 
 if __name__ == "__main__":
     main()
