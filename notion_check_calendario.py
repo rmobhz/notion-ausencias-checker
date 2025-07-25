@@ -1,182 +1,150 @@
 import os
-import requests
 from datetime import datetime, timedelta
+from notion_client import Client
+from dotenv import load_dotenv
 
-NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-DATABASE_ID_CALENDARIO = os.getenv("DATABASE_ID_CALENDARIOEDITORIAL")
+load_dotenv()
+
+notion = Client(auth=os.getenv("NOTION_TOKEN"))
+DATABASE_ID = os.getenv("DATABASE_ID_CALENDARIOEDITORIAL")
 DATABASE_ID_AUSENCIAS = os.getenv("DATABASE_ID_AUSENCIAS")
 
-HEADERS = {
-    "Authorization": f"Bearer {NOTION_API_KEY}",
-    "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json",
-}
+STATUS_IGNORADOS = ["Publicação", "Monitoramento", "Arquivado", "Concluído"]
+STATUS_YOUTUBE_IGNORADOS = [
+    "não teve como publicar", "Concluído", "Não houve reunião", 
+    "Não teve programa", "Concluído com edição"
+]
+MARGEM_DIAS = 3
 
-PESSOAS_ENVOLVIDAS = ["Responsável", "Editor(a) imagem/vídeo"]
-DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"]
+def obter_ausencias():
+    resultados = notion.databases.query(
+        **{
+            "database_id": DATABASE_ID_AUSENCIAS,
+            "filter": {
+                "and": [
+                    {"property": "Início", "date": {"is_not_empty": True}},
+                    {"property": "Fim", "date": {"is_not_empty": True}},
+                ]
+            }
+        }
+    ).get("results", [])
 
-STATUS_IGNORADOS = ["Publicação", "Monitoramente", "Arquivado", "Concluído"]
-STATUS_YOUTUBE_IGNORADOS = ["não teve como publicar", "Concluído", "Não houve reunião", 
-                            "Não teve programa", "Concluído com edição"]
+    ausencias = []
+    for a in resultados:
+        nome = a["properties"]["Pessoa"]["people"][0]["name"] if a["properties"]["Pessoa"]["people"] else None
+        inicio = a["properties"]["Início"]["date"]["start"]
+        fim = a["properties"]["Fim"]["date"]["end"] or inicio
+        if nome and inicio and fim:
+            ausencias.append({
+                "nome": nome,
+                "inicio": datetime.fromisoformat(inicio),
+                "fim": datetime.fromisoformat(fim),
+            })
+    return ausencias
 
-def fetch_database(database_id, page_size=100):
-    url = f"https://api.notion.com/v1/databases/{database_id}/query"
-    all_results = []
-    has_more = True
+def checar_conflito(data, pessoa, ausencias):
+    if not data or not pessoa:
+        return False
+    data_obj = datetime.fromisoformat(data)
+    for ausencia in ausencias:
+        if ausencia["nome"] == pessoa:
+            inicio = ausencia["inicio"]
+            fim = ausencia["fim"]
+            if inicio - timedelta(days=MARGEM_DIAS) <= data_obj <= fim + timedelta(days=MARGEM_DIAS):
+                return True
+    return False
+
+def verificar_conflitos():
+    print("🔎 Verificando conflitos entre posts e ausências...")
+
+    ausencias = obter_ausencias()
+    pagina = 0
     start_cursor = None
 
-    while has_more:
-        payload = {
-            "page_size": page_size
-        }
+    total_analisados = 0
+    total_alertas_adicionados = 0
+    total_alertas_removidos = 0
 
-        if start_cursor:
-            payload["start_cursor"] = start_cursor
-
-        response = requests.post(url, headers=HEADERS, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-        all_results.extend(data["results"])
-        has_more = data.get("has_more", False)
-        start_cursor = data.get("next_cursor")
-
-    return all_results
-
-def parse_date(date_obj):
-    if not date_obj:
-        return None
-    return datetime.fromisoformat(date_obj["start"][:10])
-
-def verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
-    for ausencia in ausencias:
-        props = ausencia["properties"]
-        if props["Servidor"]["people"]:
-            if props["Servidor"]["people"][0]["id"] == pessoa_id:
-                data_ausencia = props["Data"].get("date")
-                if data_ausencia:
-                    aus_start = parse_date(data_ausencia)
-                    aus_end = parse_date({"start": data_ausencia["end"]}) if data_ausencia.get("end") else aus_start
-                    if aus_start <= margem_fim and aus_end >= margem_inicio:
-                        return True
-    return False
-
-def atualizar_titulo(post_id, titulo_original, nomes_conflito):
-    novo_titulo = f"⚠️ {titulo_original} (Conflito: {', '.join(nomes_conflito)})"
-    url = f"https://api.notion.com/v1/pages/{post_id}"
-    data = {
-        "properties": {
-            "Título": {
-                "title": [{"text": {"content": novo_titulo}}]
+    while True:
+        response = notion.databases.query(
+            **{
+                "database_id": DATABASE_ID,
+                "start_cursor": start_cursor,
+                "page_size": 100,
             }
-        }
-    }
-    response = requests.patch(url, headers=HEADERS, json=data)
-    response.raise_for_status()
+        )
+        resultados = response.get("results", [])
+        for post in resultados:
+            total_analisados += 1
+            propriedades = post["properties"]
+            titulo_original = propriedades["Name"]["title"][0]["plain_text"] if propriedades["Name"]["title"] else ""
+            titulo_com_alerta = titulo_original.startswith("⚠️")
 
-def remover_alerta_titulo(post_id, titulo_com_alerta):
-    if not titulo_com_alerta.startswith("⚠️"):
-        return
+            status = propriedades["Status"]["select"]["name"] if propriedades["Status"]["select"] else ""
+            status_yt = propriedades["Status - YouTube"]["select"]["name"] if propriedades.get("Status - YouTube") and propriedades["Status - YouTube"]["select"] else ""
 
-    titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
+            ignorar = status in STATUS_IGNORADOS or status_yt in STATUS_YOUTUBE_IGNORADOS
 
-    url = f"https://api.notion.com/v1/pages/{post_id}"
-    data = {
-        "properties": {
-            "Título": {
-                "title": [{"text": {"content": titulo_limpo}}]
-            }
-        }
-    }
-    response = requests.patch(url, headers=HEADERS, json=data)
-    response.raise_for_status()
+            conflitos = []
 
-def deve_ignorar_post(props):
-    status = props.get("Status", {}).get("select", {}).get("name", "")
-    if status in STATUS_IGNORADOS:
-        return True
+            campos_responsaveis = [
+                "Responsável", "Apoio", "Editor(a) imagem/vídeo"
+            ]
+            campos_datas = [
+                "Veiculação", "Veiculação - YouTube", "Veiculação - TikTok"
+            ]
 
-    status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")
-    if status_yt in STATUS_YOUTUBE_IGNORADOS:
-        return True
+            for campo_responsavel in campos_responsaveis:
+                pessoas = propriedades[campo_responsavel]["people"]
+                for pessoa in pessoas:
+                    nome = pessoa["name"]
+                    for campo_data in campos_datas:
+                        data = propriedades[campo_data]["date"]["start"] if propriedades[campo_data]["date"] else None
+                        if checar_conflito(data, nome, ausencias):
+                            conflitos.append(nome)
 
-    return False
+            novo_titulo = titulo_original
+            if conflitos:
+                if not titulo_com_alerta:
+                    novo_titulo = f"⚠️ {titulo_original} (Conflito: {', '.join(set(conflitos))})"
+                    total_alertas_adicionados += 1
+                elif "(Conflito:" not in titulo_original:
+                    novo_titulo = f"{titulo_original} (Conflito: {', '.join(set(conflitos))})"
+            else:
+                if titulo_com_alerta:
+                    novo_titulo = titulo_original.replace("⚠️ ", "").split(" (Conflito:")[0]
+                    total_alertas_removidos += 1
 
-def main():
-    print("\n🔄 Verificando conflitos no Calendário Editorial...")
-    print("⏳ Buscando posts no calendário editorial...")
-    posts = fetch_database(DATABASE_ID_CALENDARIO)
-    print(f"✅ Encontrados {len(posts)} posts no calendário")
+            # Se for ignorado, mas ainda com alerta → remove o alerta
+            if ignorar and titulo_com_alerta:
+                novo_titulo = titulo_original.replace("⚠️ ", "").split(" (Conflito:")[0]
+                total_alertas_removidos += 1
 
-    print("⏳ Buscando ausências registradas...")
-    ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
-    print(f"✅ Encontradas {len(ausencias)} ausências\n")
+            # Atualiza título se necessário
+            if novo_titulo != titulo_original:
+                notion.pages.update(
+                    page_id=post["id"],
+                    properties={
+                        "Name": {
+                            "title": [
+                                {
+                                    "type": "text",
+                                    "text": {"content": novo_titulo}
+                                }
+                            ]
+                        }
+                    }
+                )
 
-    posts_com_alerta = 0
-    alertas_removidos = 0
-    posts_ignorados_com_alerta = 0
-
-    for post in posts:
-        props = post["properties"]
-        titulo_raw = props.get("Título", {}).get("title", [{}])
-
-        if not titulo_raw or not titulo_raw[0].get("text", {}).get("content"):
-            continue
-
-        titulo_atual = titulo_raw[0]["text"]["content"]
-        post_id = post["id"]
-
-        # Verificação se deve ser ignorado
-        ignorado = deve_ignorar_post(props)
-        if ignorado and titulo_atual.startswith("⚠️"):
-            remover_alerta_titulo(post_id, titulo_atual)
-            alertas_removidos += 1
-            posts_ignorados_com_alerta += 1
-            print(f"✅ [STATUS IGNORADO] Alerta removido: {titulo_atual[:50]}...")
-            continue
-        elif ignorado:
-            continue
-
-        # Identificar pessoas envolvidas
-        pessoas_envolvidas = []
-        for campo in PESSOAS_ENVOLVIDAS:
-            if campo in props and props[campo].get("people"):
-                for pessoa in props[campo]["people"]:
-                    pessoas_envolvidas.append((pessoa["id"], pessoa.get("name", "Desconhecido")))
-
-        # Verificar conflitos de ausência
-        nomes_com_conflito = set()
-        for campo_data in DATAS_DE_VEICULACAO:
-            if campo_data in props and props[campo_data].get("date"):
-                data_veiculacao = parse_date(props[campo_data]["date"])
-                if data_veiculacao:
-                    margem_inicio = data_veiculacao - timedelta(days=3)
-                    margem_fim = data_veiculacao
-
-                    for pessoa_id, pessoa_nome in pessoas_envolvidas:
-                        if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
-                            nomes_com_conflito.add(pessoa_nome)
-
-        nomes_conflito = sorted(list(nomes_com_conflito))
-
-        if nomes_conflito:
-            if not titulo_atual.startswith("⚠️") or "Conflito:" not in titulo_atual:
-                titulo_original = titulo_atual.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
-                atualizar_titulo(post_id, titulo_original, nomes_conflito)
-                posts_com_alerta += 1
-                print(f"⚠️ [CONFLITO DETECTADO] {titulo_original[:50]}... → {', '.join(nomes_conflito)}")
-        else:
-            if titulo_atual.startswith("⚠️") and "Conflito:" in titulo_atual:
-                remover_alerta_titulo(post_id, titulo_atual)
-                alertas_removidos += 1
-                print(f"✅ [SEM CONFLITO] Alerta removido: {titulo_atual[:50]}...")
+        if not response.get("has_more"):
+            break
+        start_cursor = response.get("next_cursor")
+        pagina += 1
 
     print(f"\n🔍 Resumo da verificação:")
-    print(f"• Posts analisados: {len(posts)}")
-    print(f"• Alertas adicionados: {posts_com_alerta}")
-    print(f"• Alertas removidos: {alertas_removidos}")
-    print(f"• Posts com status ignorado e alerta removido: {posts_ignorados_com_alerta}")
-    print("✅ Verificação concluída!\n")
+    print(f"• Posts analisados: {total_analisados}")
+    print(f"• Alertas adicionados: {total_alertas_adicionados}")
+    print(f"• Alertas removidos: {total_alertas_removidos}")
 
 if __name__ == "__main__":
-    main()
+    verificar_conflitos()
