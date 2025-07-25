@@ -121,6 +121,13 @@ def main():
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
 
+        status = props.get("Status", {}).get("select", {}).get("name", "")
+        status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")        
+        if status in STATUS_IGNORADOS or status_yt in STATUS_YOUTUBE_IGNORADOS:
+            print(f"Ignorando post '{titulo_atual[:30]}' com status '{status}' e status YT '{status_yt}'")
+        else:
+            print(f"Analisando post '{titulo_atual[:30]}' com status '{status}' e status YT '{status_yt}'")
+
         if deve_ignorar_post(props):
             ignorados += 1
             if titulo_atual.startswith("⚠️"):
