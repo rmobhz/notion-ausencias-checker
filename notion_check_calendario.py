@@ -1,6 +1,5 @@
 import os
 import requests
-import json
 from datetime import datetime, timedelta
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
@@ -89,11 +88,11 @@ def remover_alerta_titulo(post_id, titulo_com_alerta):
     response.raise_for_status()
 
 def deve_ignorar_post(props):
-    status = props.get("Status", {}).get("select", {}).get("name", "")
+    status = props.get("Status", {}).get("status", {}).get("name", "")
     if status in STATUS_IGNORADOS:
         return True
 
-    status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")
+    status_yt = props.get("Status - YouTube", {}).get("status", {}).get("name", "")
     if status_yt in STATUS_YOUTUBE_IGNORADOS:
         return True
 
@@ -122,10 +121,8 @@ def main():
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
 
-        print(f"\n🔍 Propriedades completas do post: {titulo_atual}")
-        print(json.dumps(props, indent=2, ensure_ascii=False))
-        status = props.get("Status", {}).get("select", {}).get("name", "")
-        status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")        
+        status = props.get("Status", {}).get("status", {}).get("name", "")
+        status_yt = props.get("Status - YouTube", {}).get("status", {}).get("name", "")        
         if status in STATUS_IGNORADOS or status_yt in STATUS_YOUTUBE_IGNORADOS:
             print(f"Ignorando post '{titulo_atual[:30]}' com status '{status}' e status YT '{status_yt}'")
         else:
