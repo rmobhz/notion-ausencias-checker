@@ -127,6 +127,8 @@ def main():
             print(f"Ignorando post '{titulo_atual[:30]}' com status '{status}' e status YT '{status_yt}'")
         else:
             print(f"Analisando post '{titulo_atual[:30]}' com status '{status}' e status YT '{status_yt}'")
+        if not status and not status_yt:
+            print(f"⚠️ [STATUS VAZIO] Post '{titulo_atual[:50]}' sem status definido!")
 
         if deve_ignorar_post(props):
             ignorados += 1
