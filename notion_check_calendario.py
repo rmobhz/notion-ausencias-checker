@@ -17,30 +17,30 @@ DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação -
 
 STATUS_IGNORADOS = ["Publicação", "Monitoramente", "Arquivado", "Concluído"]
 STATUS_YOUTUBE_IGNORADOS = ["não teve como publicar", "Concluído", "Não houve reunião", 
-                           "Não teve programa", "Concluído com edição"]
+                            "Não teve programa", "Concluído com edição"]
 
 def fetch_database(database_id, page_size=100):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
     all_results = []
     has_more = True
     start_cursor = None
-    
+
     while has_more:
         payload = {
             "page_size": page_size
         }
-        
+
         if start_cursor:
             payload["start_cursor"] = start_cursor
-        
+
         response = requests.post(url, headers=HEADERS, json=payload)
         response.raise_for_status()
         data = response.json()
-        
+
         all_results.extend(data["results"])
         has_more = data.get("has_more", False)
         start_cursor = data.get("next_cursor")
-    
+
     return all_results
 
 def parse_date(date_obj):
@@ -77,9 +77,9 @@ def atualizar_titulo(post_id, titulo_original, nomes_conflito):
 def remover_alerta_titulo(post_id, titulo_com_alerta):
     if not titulo_com_alerta.startswith("⚠️"):
         return
-    
+
     titulo_limpo = titulo_com_alerta.replace("⚠️ ", "").split(" (Conflito:")[0].strip()
-    
+
     url = f"https://api.notion.com/v1/pages/{post_id}"
     data = {
         "properties": {
@@ -95,11 +95,11 @@ def deve_ignorar_post(props):
     status = props.get("Status", {}).get("select", {}).get("name", "")
     if status in STATUS_IGNORADOS:
         return True
-    
+
     status_yt = props.get("Status - YouTube", {}).get("select", {}).get("name", "")
     if status_yt in STATUS_YOUTUBE_IGNORADOS:
         return True
-    
+
     return False
 
 def main():
@@ -108,52 +108,43 @@ def main():
     posts = fetch_database(DATABASE_ID_CALENDARIO)
     print(f"✅ Encontrados {len(posts)} posts no calendário")
 
-    # 🧹 Remover todos os alertas antes de analisar
-    print("🧹 Removendo alertas antigos de todos os posts...")
-    for post in posts:
-        props = post["properties"]
-        titulo_raw = props.get("Título", {}).get("title", [{}])
-
-        if not titulo_raw or not titulo_raw[0].get("text", {}).get("content"):
-            continue
-
-        titulo_atual = titulo_raw[0]["text"]["content"]
-        post_id = post["id"]
-
-        if titulo_atual.startswith("⚠️"):
-            remover_alerta_titulo(post_id, titulo_atual)
-            print(f"🔧 Alerta removido do título: {titulo_atual[:50]}...")
-
     print("⏳ Buscando ausências registradas...")
     ausencias = fetch_database(DATABASE_ID_AUSENCIAS)
     print(f"✅ Encontradas {len(ausencias)} ausências\n")
 
     posts_com_alerta = 0
     alertas_removidos = 0
+    posts_ignorados_com_alerta = 0
 
     for post in posts:
         props = post["properties"]
         titulo_raw = props.get("Título", {}).get("title", [{}])
-        
+
         if not titulo_raw or not titulo_raw[0].get("text", {}).get("content"):
             continue
-            
+
         titulo_atual = titulo_raw[0]["text"]["content"]
         post_id = post["id"]
-        
-        if deve_ignorar_post(props):
-            if titulo_atual.startswith("⚠️"):
-                remover_alerta_titulo(post_id, titulo_atual)
-                alertas_removidos += 1
-                print(f"✅ [STATUS IGNORADO] Alerta removido: {titulo_atual[:50]}...")
+
+        # Verificação se deve ser ignorado
+        ignorado = deve_ignorar_post(props)
+        if ignorado and titulo_atual.startswith("⚠️"):
+            remover_alerta_titulo(post_id, titulo_atual)
+            alertas_removidos += 1
+            posts_ignorados_com_alerta += 1
+            print(f"✅ [STATUS IGNORADO] Alerta removido: {titulo_atual[:50]}...")
             continue
-        
+        elif ignorado:
+            continue
+
+        # Identificar pessoas envolvidas
         pessoas_envolvidas = []
         for campo in PESSOAS_ENVOLVIDAS:
             if campo in props and props[campo].get("people"):
                 for pessoa in props[campo]["people"]:
                     pessoas_envolvidas.append((pessoa["id"], pessoa.get("name", "Desconhecido")))
 
+        # Verificar conflitos de ausência
         nomes_com_conflito = set()
         for campo_data in DATAS_DE_VEICULACAO:
             if campo_data in props and props[campo_data].get("date"):
@@ -184,7 +175,7 @@ def main():
     print(f"• Posts analisados: {len(posts)}")
     print(f"• Alertas adicionados: {posts_com_alerta}")
     print(f"• Alertas removidos: {alertas_removidos}")
-    print(f"• Posts com status ignorado: {alertas_removidos - posts_com_alerta if alertas_removidos > posts_com_alerta else 0}")
+    print(f"• Posts com status ignorado e alerta removido: {posts_ignorados_com_alerta}")
     print("✅ Verificação concluída!\n")
 
 if __name__ == "__main__":
