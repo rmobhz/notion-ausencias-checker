@@ -42,7 +42,7 @@ def fetch_database(database_id, page_size=100):
 def parse_date(date_obj):
     if not date_obj:
         return None
-    return datetime.fromisoformat(date_obj["start"][:10])
+    return datetime.fromisoformat(date_obj["start"][:10]).date()
 
 def verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
     for ausencia in ausencias:
@@ -52,7 +52,7 @@ def verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_
                 data_ausencia = props["Data"].get("date")
                 if data_ausencia:
                     aus_start = parse_date(data_ausencia)
-                    aus_end = parse_date({"start": data_ausencia["end"]}) if data_ausencia.get("end") else aus_start
+                    aus_end = parse_date({"start": data_ausencia.get("end")}) if data_ausencia.get("end") else aus_start
                     if aus_start <= margem_fim and aus_end >= margem_inicio:
                         return True
     return False
@@ -143,11 +143,11 @@ def main():
                     editoria = props.get("Editoria", {}).get("select", {}).get("name", "").lower()
                     # Define a margem de datas dependendo da Editoria
                     if editoria == "agenda parlamentar":
-                        margem_inicio = data_veiculacao
-                        margem_fim = data_veiculacao
+                        margem_inicio = data_veiculacao.date()
+                        margem_fim = data_veiculacao.date()
                     else:
-                        margem_inicio = data_veiculacao - timedelta(days=3)
-                        margem_fim = data_veiculacao
+                        margem_inicio = (data_veiculacao - timedelta(days=3)).date()
+                        margem_fim = data_veiculacao.date()
 
                     for pessoa_id, pessoa_nome in pessoas_envolvidas:
                         if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
