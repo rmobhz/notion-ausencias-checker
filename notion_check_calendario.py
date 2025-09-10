@@ -143,11 +143,11 @@ def main():
                     editoria = props.get("Editoria", {}).get("select", {}).get("name", "").lower()
                     # Define a margem de datas dependendo da Editoria
                     if editoria == "agenda parlamentar":
-                        margem_inicio = data_veiculacao.date()
-                        margem_fim = data_veiculacao.date()
+                        margem_inicio = data_veiculacao
+                        margem_fim = data_veiculacao
                     else:
-                        margem_inicio = (data_veiculacao - timedelta(days=3)).date()
-                        margem_fim = data_veiculacao.date()
+                        margem_inicio = data_veiculacao - timedelta(days=3)
+                        margem_fim = data_veiculacao
 
                     for pessoa_id, pessoa_nome in pessoas_envolvidas:
                         if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
