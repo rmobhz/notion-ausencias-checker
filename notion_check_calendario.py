@@ -140,8 +140,8 @@ def main():
             if campo_data in props and props[campo_data].get("date"):
                 data_veiculacao = parse_date(props[campo_data]["date"])
                 if data_veiculacao:
-                    # Nova regra: se Editoria == "Agenda Parlamentar", usar apenas o dia exato
-                    if props.get("Editoria", {}).get("select", {}).get("name") == "Agenda parlamentar":
+                    # Nova regra: se Editoria == "Agenda parlamentar", usar apenas o dia exato
+                    if props.get("Editoria", {}).get("select", {}).get("name", "").lower() == "agenda parlamentar":
                         margem_inicio = data_veiculacao
                         margem_fim = data_veiculacao
                     else:
