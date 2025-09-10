@@ -17,7 +17,7 @@ DATAS_DE_VEICULACAO = ["Veiculação", "Veiculação - YouTube", "Veiculação -
 
 STATUS_IGNORADOS = ["Publicação", "Monitoramente", "Arquivado", "Concluído"]
 STATUS_YOUTUBE_IGNORADOS = ["não teve como publicar", "Concluído", "Não houve reunião", 
-                           "Não teve programa", "Concluído com edição"]
+                            "Não teve programa", "Concluído com edição"]
 
 def fetch_database(database_id, page_size=100):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
@@ -140,8 +140,13 @@ def main():
             if campo_data in props and props[campo_data].get("date"):
                 data_veiculacao = parse_date(props[campo_data]["date"])
                 if data_veiculacao:
-                    margem_inicio = data_veiculacao - timedelta(days=3)
-                    margem_fim = data_veiculacao
+                    # Nova regra: se Editoria == "Agenda Parlamentar", usar apenas o dia exato
+                    if props.get("Editoria", {}).get("select", {}).get("name") == "Agenda Parlamentar":
+                        margem_inicio = data_veiculacao
+                        margem_fim = data_veiculacao
+                    else:
+                        margem_inicio = data_veiculacao - timedelta(days=3)
+                        margem_fim = data_veiculacao
 
                     for pessoa_id, pessoa_nome in pessoas_envolvidas:
                         if verificar_ausencias_para_pessoa(pessoa_id, ausencias, margem_inicio, margem_fim):
