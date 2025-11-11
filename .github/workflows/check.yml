@@ -23,10 +23,10 @@ jobs:
 
       - name: Executar scripts de verificação e automação
         run: |
-          echo "▶️ Verificando conflitos entre reuniões e ausências..."
-          python notion_check.py
-          echo "▶️ Verificando calendário editorial..."
-          python notion_check_calendario.py
+          # echo "▶️ Verificando conflitos entre reuniões e ausências..."
+          # python notion_check.py
+          # echo "▶️ Verificando calendário editorial..."
+          # python notion_check_calendario.py
           echo "▶️ Criando reuniões recorrentes..."
           python create_recurring_meetings.py
         env:
