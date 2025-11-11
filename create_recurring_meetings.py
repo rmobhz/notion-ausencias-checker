@@ -100,63 +100,6 @@ def create_instance(base_meeting, target_date):
     return r.json()
 
 
-def archive_page(page_id):
-    """Arquiva uma página no Notion com tratamento de erro."""
-    url = f"https://api.notion.com/v1/pages/{page_id}"
-    r = requests.patch(url, headers=HEADERS, json={"archived": True})
-    if r.status_code == 200:
-        print(f"   ↳ Página arquivada com sucesso ({page_id})")
-    else:
-        print(f"   ⚠️ Erro ao arquivar ({page_id}): {r.status_code} - {r.text}")
-
-
-def delete_recurring_instances():
-    """Apaga instâncias órfãs (sem 'Reunião original' ou com relação quebrada)."""
-    print("🧹 Limpando instâncias órfãs...")
-    meetings = get_meetings()
-    orphan_count = 0
-
-    for meeting in meetings:
-        event_prop = meeting["properties"].get("Evento", {}).get("title", [])
-        if not event_prop:
-            continue
-
-        event = event_prop[0]["plain_text"].strip()
-        relation_prop = meeting["properties"].get("Reunião original", {})
-        relation_list = relation_prop.get("relation", []) or []
-        is_recurring_instance = event.startswith(RECURRING_EMOJI)
-
-        if not is_recurring_instance:
-            continue
-
-        # Caso 1: Nenhuma relação
-        if len(relation_list) == 0:
-            print(f"🗑️ Instância órfã sem relação: {event}")
-            archive_page(meeting["id"])
-            orphan_count += 1
-            continue
-
-        # Caso 2: Relação quebrada ou reunião original arquivada/excluída
-        base_id = relation_list[0]["id"]
-        base_url = f"https://api.notion.com/v1/pages/{base_id}"
-        r = requests.get(base_url, headers=HEADERS)
-
-        if r.status_code == 404:
-            print(f"🗑️ Instância órfã — reunião original não encontrada (excluída): {event}")
-            archive_page(meeting["id"])
-            orphan_count += 1
-            continue
-
-        if r.status_code == 200:
-            base_page = r.json()
-            if base_page.get("archived", False):
-                print(f"🗑️ Instância órfã — reunião original arquivada: {event}")
-                archive_page(meeting["id"])
-                orphan_count += 1
-
-    print(f"✅ Limpeza concluída — {orphan_count} instâncias órfãs arquivadas.")
-
-
 def generate_daily(base_meeting, base_date, today, limit_date):
     next_date = base_date + datetime.timedelta(days=1)
     while next_date <= limit_date:
@@ -229,7 +172,6 @@ def main():
         else:
             print(f"⚠️ Tipo de recorrência desconhecido: {recurrence}")
 
-    delete_recurring_instances()
     print("🏁 Rotina concluída com sucesso.")
 
 
