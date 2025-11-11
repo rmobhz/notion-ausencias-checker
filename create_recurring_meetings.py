@@ -1,6 +1,7 @@
 import os
 import datetime
 import requests
+from dateutil.relativedelta import relativedelta
 
 # 🔐 Variáveis de ambiente
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
@@ -8,6 +9,9 @@ DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
 
 # 🧮 Limite de dias futuros para criar instâncias (padrão: 30 dias)
 LIMIT_DAYS = int(os.getenv("RECURRING_LIMIT_DAYS", "30"))
+# Opcional: limite de meses para recorrência mensal (None = sem limite extra)
+MAX_MONTHS = os.getenv("RECURRING_MAX_MONTHS", "12")
+MAX_MONTHS = int(MAX_MONTHS) if MAX_MONTHS and MAX_MONTHS.isdigit() else None
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -15,12 +19,10 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# 🏷️ Emoji que marca as instâncias criadas automaticamente
 RECURRING_EMOJI = "🔁"
 
 
 def get_meetings():
-    """Busca todas as reuniões na base"""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     payload = {"page_size": 100}
     response = requests.post(url, headers=HEADERS, json=payload)
@@ -28,97 +30,136 @@ def get_meetings():
     return response.json().get("results", [])
 
 
-def has_future_instance(base_meeting):
-    """Verifica se já existe instância futura da mesma reunião original"""
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
-    payload = {
-        "filter": {
-            "and": [
-                {"property": "Reunião Original", "relation": {"contains": base_meeting["id"]}},
-                {"property": "Data", "date": {"on_or_after": datetime.date.today().isoformat()}}
-            ]
-        }
-    }
-    response = requests.post(url, headers=HEADERS, json=payload)
-    response.raise_for_status()
-    return len(response.json().get("results", [])) > 0
-
-
-def check_existing_instance(base_title, date_to_check):
-    """Verifica se já existe instância com mesmo título e mesma data"""
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
+def instance_exists_for_date(base_meeting, date_to_check):
+    """
+    Verifica se já existe uma instância gerada desta 'Reunião Original'
+    exatamente na data indicada (compara via relação + Data).
+    """
+    page_id = base_meeting["id"]
     date_str = date_to_check.strftime("%Y-%m-%d")
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     payload = {
         "filter": {
             "and": [
-                {"property": "Evento", "rich_text": {"equals": base_title}},
+                {"property": "Reunião Original", "relation": {"contains": page_id}},
                 {"property": "Data", "date": {"on_or_after": date_str}},
                 {"property": "Data", "date": {"on_or_before": date_str}}
             ]
         }
     }
-    response = requests.post(url, headers=HEADERS, json=payload)
-    response.raise_for_status()
-    results = response.json().get("results", [])
-    return len(results) > 0
+    r = requests.post(url, headers=HEADERS, json=payload)
+    r.raise_for_status()
+    return len(r.json().get("results", [])) > 0
 
 
-def create_meeting(base_meeting, new_date):
-    """Cria uma nova instância de reunião recorrente"""
+def check_existing_instance_by_title_date(base_event, date_to_check):
+    """
+    Verifica se já existe qualquer página com mesmo Evento e mesma data.
+    Mantive essa verificação como extra (por segurança).
+    """
+    date_str = date_to_check.strftime("%Y-%m-%d")
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
+    payload = {
+        "filter": {
+            "and": [
+                {"property": "Evento", "rich_text": {"equals": base_event}},
+                {"property": "Data", "date": {"on_or_after": date_str}},
+                {"property": "Data", "date": {"on_or_before": date_str}}
+            ]
+        }
+    }
+    r = requests.post(url, headers=HEADERS, json=payload)
+    r.raise_for_status()
+    return len(r.json().get("results", [])) > 0
+
+
+def create_instance(base_meeting, target_date):
     props = base_meeting["properties"]
-    title = props["Evento"]["title"][0]["plain_text"]
+    event = props["Evento"]["title"][0]["plain_text"]
     recurrence = props["Recorrência"]["select"]["name"]
     page_id = base_meeting["id"]
 
-    # Evita duplicação por data e título
-    if check_existing_instance(title, new_date):
-        print(f"⚠️ Já existe uma instância de '{title}' em {new_date}")
+    # segurança dupla: se já existir por relação/data ou por título/data, pula
+    if instance_exists_for_date(base_meeting, target_date):
+        print(f"⚠️ Instância já existe por relação: '{event}' em {target_date}")
+        return None
+    if check_existing_instance_by_title_date(event, target_date):
+        print(f"⚠️ Instância já existe por título: '{event}' em {target_date}")
         return None
 
-    # Evita duplicação por relação
-    if has_future_instance(base_meeting):
-        print(f"⚠️ Já existe uma instância futura de '{title}'. Ignorando criação.")
-        return None
-
-    new_title = f"{RECURRING_EMOJI} {title}"
-    new_page = {
+    new_event = f"{RECURRING_EMOJI} {event}"
+    payload = {
         "parent": {"database_id": DATABASE_ID_REUNIOES},
         "properties": {
-            "Evento": {"title": [{"text": {"content": new_title}}]},
-            "Data": {"date": {"start": new_date.isoformat()}},
+            "Evento": {"title": [{"text": {"content": new_event}}]},
+            "Data": {"date": {"start": target_date.isoformat()}},
             "Recorrência": {"select": {"name": recurrence}},
             "Reunião Original": {"relation": [{"id": page_id}]},
         }
     }
 
-    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=new_page)
+    r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
     r.raise_for_status()
-    print(f"✅ Instância criada: {new_title} ({new_date})")
+    print(f"✅ Instância criada: {new_event} → {target_date}")
     return r.json()
 
 
 def delete_recurring_instances():
-    """Apaga instâncias órfãs (sem reunião original)"""
     print("🧹 Limpando instâncias órfãs...")
     meetings = get_meetings()
     for meeting in meetings:
-        title_prop = meeting["properties"].get("Evento", {}).get("title", [])
-        if not title_prop:
+        event_prop = meeting["properties"].get("Evento", {}).get("title", [])
+        if not event_prop:
             continue
-        title = title_prop[0]["plain_text"]
-
-        if title.startswith(RECURRING_EMOJI):
-            origem = meeting["properties"].get("Reunião Original", {}).get("relation", [])
-            if not origem:
+        event = event_prop[0]["plain_text"]
+        if event.startswith(RECURRING_EMOJI):
+            rel = meeting["properties"].get("Reunião Original", {}).get("relation", [])
+            if not rel:
                 page_id = meeting["id"]
-                print(f"🗑️ Apagando instância órfã: {title}")
+                print(f"🗑️ Arquivando instância órfã: {event}")
                 url = f"https://api.notion.com/v1/pages/{page_id}"
-                payload = {"archived": True}
-                requests.patch(url, headers=HEADERS, json=payload)
+                requests.patch(url, headers=HEADERS, json={"archived": True})
+
+
+def generate_daily(base_meeting, base_date, today, limit_date):
+    # gera dia a dia até limit_date, pulando sáb/dom
+    next_date = base_date + datetime.timedelta(days=1)
+    while next_date <= limit_date:
+        if next_date <= today:
+            next_date += datetime.timedelta(days=1)
+            continue
+        # pular finais de semana (sábado=5, domingo=6)
+        if next_date.weekday() in (5, 6):
+            print(f"⏭️ Pulando fim de semana: {next_date}")
+            next_date += datetime.timedelta(days=1)
+            continue
+        create_instance(base_meeting, next_date)
+        next_date += datetime.timedelta(days=1)
+
+
+def generate_weekly(base_meeting, base_date, today, limit_date):
+    next_date = base_date + datetime.timedelta(weeks=1)
+    while next_date <= limit_date:
+        if next_date > today:
+            create_instance(base_meeting, next_date)
+        next_date += datetime.timedelta(weeks=1)
+
+
+def generate_monthly(base_meeting, base_date, today, limit_date):
+    # gera a cada mês enquanto <= limit_date e respeitando MAX_MONTHS se definido
+    next_date = base_date + relativedelta(months=1)
+    months_created = 0
+    while next_date <= limit_date:
+        if MAX_MONTHS is not None and months_created >= MAX_MONTHS:
+            break
+        if next_date > today:
+            create_instance(base_meeting, next_date)
+            months_created += 1
+        next_date += relativedelta(months=1)
 
 
 def main():
-    print("🔄 Iniciando geração de reuniões recorrentes...")
+    print("🔄 Iniciando geração de reuniões recorrentes (multi-instâncias)...")
     meetings = get_meetings()
     today = datetime.date.today()
     limit_date = today + datetime.timedelta(days=LIMIT_DAYS)
@@ -130,8 +171,6 @@ def main():
             continue
 
         recurrence = recurrence_prop["name"].lower().strip()
-
-        # Recorrência desativada
         if recurrence in ("", "nenhuma"):
             continue
 
@@ -140,34 +179,25 @@ def main():
             continue
 
         base_date = datetime.date.fromisoformat(data_prop["start"][:10])
-        title = props["Evento"]["title"][0]["plain_text"]
+        event = props["Evento"]["title"][0]["plain_text"]
 
-        # 🔒 Não recria instâncias de reuniões no passado
+        # não recriar instâncias para reuniões-base no passado
         if base_date < today:
-            print(f"⏸️ Ignorando '{title}' — data original ({base_date}) já passou.")
+            print(f"⏸️ Ignorando '{event}' — data base {base_date} já passou.")
             continue
 
-        # Define a próxima data de acordo com a recorrência
+        print(f"🔁 Processando '{event}' — recorrência: {recurrence}")
+
         if recurrence == "diária":
-            next_date = base_date + datetime.timedelta(days=1)
+            generate_daily(meeting, base_date, today, limit_date)
         elif recurrence == "semanal":
-            next_date = base_date + datetime.timedelta(weeks=1)
+            generate_weekly(meeting, base_date, today, limit_date)
         elif recurrence == "mensal":
-            year, month = base_date.year, base_date.month
-            new_month = month + 1 if month < 12 else 1
-            new_year = year if month < 12 else year + 1
-            day = min(base_date.day, [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][new_month - 1])
-            next_date = datetime.date(new_year, new_month, day)
+            # regra inteligente: gerar mensalmente enquanto a data estiver dentro do limite
+            # (opcional: pare após MAX_MONTHS, se configurado)
+            generate_monthly(meeting, base_date, today, limit_date)
         else:
-            continue
-
-        if next_date > limit_date:
-            print(f"🚫 Ignorando '{title}' — próxima data ({next_date}) ultrapassa o limite de {LIMIT_DAYS} dias.")
-            continue
-
-        if next_date > today:
-            print(f"➕ Criando instância futura de '{title}' para {next_date}")
-            create_meeting(meeting, next_date)
+            print(f"⚠️ Tipo de recorrência desconhecido: {recurrence}")
 
     delete_recurring_instances()
     print("🏁 Rotina concluída com sucesso.")
