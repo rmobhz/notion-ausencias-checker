@@ -65,10 +65,9 @@ def create_meeting(base_meeting, new_date):
             "Título": {"title": [{"text": {"content": new_title}}]},
             "Data": {"date": {"start": new_date.isoformat()}},
             "Recorrência": {"select": {"name": recurrence}},
-            "Origem": {"relation": [{"id": page_id}]} if "Origem" in props else None,
+            "Reunião Original": {"relation": [{"id": page_id}]},
         }
     }
-    new_page["properties"] = {k: v for k, v in new_page["properties"].items() if v is not None}
 
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=new_page)
     r.raise_for_status()
@@ -77,7 +76,7 @@ def create_meeting(base_meeting, new_date):
 
 
 def delete_recurring_instances():
-    """Apaga instâncias órfãs (sem origem)"""
+    """Apaga instâncias órfãs (sem reunião original)"""
     print("🧹 Limpando instâncias órfãs...")
     meetings = get_meetings()
     for meeting in meetings:
@@ -87,7 +86,7 @@ def delete_recurring_instances():
         title = title_prop[0]["plain_text"]
 
         if title.startswith(RECURRING_EMOJI):
-            origem = meeting["properties"].get("Origem", {}).get("relation", [])
+            origem = meeting["properties"].get("Reunião Original", {}).get("relation", [])
             if not origem:
                 page_id = meeting["id"]
                 print(f"🗑️ Apagando instância órfã: {title}")
@@ -104,10 +103,16 @@ def main():
 
     for meeting in meetings:
         props = meeting["properties"]
-        if "Recorrência" not in props or not props["Recorrência"]["select"]:
+        recurrence_prop = props.get("Recorrência", {}).get("select")
+        if not recurrence_prop:
             continue
 
-        recurrence = props["Recorrência"]["select"]["name"].lower()
+        recurrence = recurrence_prop["name"].lower().strip()
+
+        # Recorrência desativada
+        if recurrence in ("", "nenhuma"):
+            continue
+
         data_prop = props.get("Data", {}).get("date")
         if not data_prop:
             continue
@@ -115,15 +120,18 @@ def main():
         base_date = datetime.date.fromisoformat(data_prop["start"][:10])
         title = props["Título"]["title"][0]["plain_text"]
 
-        # Permite pausar uma recorrência via checkbox "Ativo"
-        if "Ativo" in props and props["Ativo"].get("checkbox") is False:
-            print(f"⏸️ Recorrência pausada para '{title}'")
-            continue
-
+        # Define a próxima data de acordo com a recorrência
         if recurrence == "diária":
             next_date = base_date + datetime.timedelta(days=1)
         elif recurrence == "semanal":
-            next_date = base_date + datetime.timedelta(days=7)
+            next_date = base_date + datetime.timedelta(weeks=1)
+        elif recurrence == "mensal":
+            # Adiciona um mês respeitando mudanças de tamanho do mês
+            year, month = base_date.year, base_date.month
+            new_month = month + 1 if month < 12 else 1
+            new_year = year if month < 12 else year + 1
+            day = min(base_date.day, [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][new_month - 1])
+            next_date = datetime.date(new_year, new_month, day)
         else:
             continue
 
