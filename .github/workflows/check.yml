@@ -19,7 +19,7 @@ jobs:
           python-version: "3.10"
 
       - name: Instalar dependências
-        run: pip install requests notion-client
+        run: pip install requests notion-client python-dateutil
 
       - name: Executar scripts de verificação e automação
         run: |
