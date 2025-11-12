@@ -81,7 +81,7 @@ def check_existing_instance_by_title_date(base_event, date_to_check):
 
 
 def create_instance(base_meeting, target_date):
-    """Cria uma nova instância da reunião recorrente."""
+    """Cria uma nova instância da reunião recorrente copiando todas as propriedades da reunião original."""
     props = base_meeting["properties"]
     event = props["Evento"]["title"][0]["plain_text"]
     recurrence = props["Recorrência"]["select"]["name"]
@@ -95,15 +95,32 @@ def create_instance(base_meeting, target_date):
         print(f"⚠️ Instância já existe por título: '{event}' em {target_date}")
         return None
 
+    # Copia todas as propriedades da reunião original
+    new_properties = {}
+    for key, value in props.items():
+        # ignora campos que precisam ser substituídos
+        if key in ["Data", "Reuniões relacionadas (recorrência)"]:
+            continue
+        new_properties[key] = value
+
+    # Define a nova data
+    new_properties["Data"] = {"date": {"start": target_date.isoformat()}}
+
+    # Define o título com emoji de recorrência
     new_event = f"{RECURRING_EMOJI} {event}"
+    new_properties["Evento"] = {"title": [{"text": {"content": new_event}}]}
+
+    # Adiciona relação com a reunião original
+    new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
+
+    # Garante que a recorrência seja mantida
+    if recurrence:
+        new_properties["Recorrência"] = {"select": {"name": recurrence}}
+
+    # Cria a nova página (instância)
     payload = {
         "parent": {"database_id": DATABASE_ID_REUNIOES},
-        "properties": {
-            "Evento": {"title": [{"text": {"content": new_event}}]},
-            "Data": {"date": {"start": target_date.isoformat()}},
-            "Recorrência": {"select": {"name": recurrence}},
-            "Reuniões relacionadas (recorrência)": {"relation": [{"id": page_id}]},
-        }
+        "properties": new_properties
     }
 
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
