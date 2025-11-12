@@ -9,7 +9,6 @@ DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
 
 # 🧮 Limite de dias futuros para criar instâncias (padrão: 30 dias)
 LIMIT_DAYS = int(os.getenv("RECURRING_LIMIT_DAYS", "30"))
-# Opcional: limite de meses para recorrência mensal (None = sem limite extra)
 MAX_MONTHS = os.getenv("RECURRING_MAX_MONTHS", "12")
 MAX_MONTHS = int(MAX_MONTHS) if MAX_MONTHS and MAX_MONTHS.isdigit() else None
 
@@ -20,23 +19,6 @@ HEADERS = {
 }
 
 RECURRING_EMOJI = "🔁"
-
-# Tipos de propriedade que podemos setar ao criar uma página
-CREATABLE_PROP_TYPES = {
-    "title",
-    "rich_text",
-    "number",
-    "select",
-    "multi_select",
-    "date",
-    "people",
-    "files",
-    "checkbox",
-    "url",
-    "email",
-    "phone_number",
-    "relation"
-}
 
 
 def get_meetings():
@@ -61,7 +43,7 @@ def get_meetings():
 
 
 def instance_exists_for_date(base_meeting, date_to_check):
-    """Verifica se já existe uma instância gerada desta 'Reuniões relacionadas (recorrência)' na data indicada."""
+    """Verifica se já existe uma instância gerada desta 'Reunião relacionada (recorrência)' na data indicada."""
     page_id = base_meeting["id"]
     date_str = date_to_check.strftime("%Y-%m-%d")
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
@@ -97,87 +79,50 @@ def check_existing_instance_by_title_date(base_event, date_to_check):
     return len(r.json().get("results", [])) > 0
 
 
-def _get_title_text(props):
-    """Pega texto do título base de forma segura."""
-    try:
-        title_prop = props.get("Evento", {}).get("title", [])
-        if title_prop and isinstance(title_prop, list):
-            return title_prop[0].get("plain_text") or title_prop[0].get("text", {}).get("content", "")
-    except Exception:
-        pass
-    return "(sem título)"
-
-
 def create_instance(base_meeting, target_date):
-    """Cria uma nova instância da reunião recorrente copiando propriedades válidas."""
-    props = base_meeting.get("properties", {})
-    event_text = _get_title_text(props)
-    recurrence = None
-    try:
-        recurrence = props.get("Recorrência", {}).get("select", {}).get("name")
-    except Exception:
-        recurrence = None
+    """Cria uma nova instância da reunião recorrente copiando todas as propriedades da reunião original."""
+    props = base_meeting["properties"]
+    event = props["Evento"]["title"][0]["plain_text"]
+    recurrence = props["Recorrência"]["select"]["name"]
     page_id = base_meeting["id"]
 
     # segurança dupla: se já existir por relação/data ou por título/data, pula
     if instance_exists_for_date(base_meeting, target_date):
-        print(f"⚠️ Instância já existe por relação: '{event_text}' em {target_date}")
+        print(f"⚠️ Instância já existe por relação: '{event}' em {target_date}")
         return None
-    if check_existing_instance_by_title_date(event_text, target_date):
-        print(f"⚠️ Instância já existe por título: '{event_text}' em {target_date}")
+    if check_existing_instance_by_title_date(event, target_date):
+        print(f"⚠️ Instância já existe por título: '{event}' em {target_date}")
         return None
 
-    # --- Monta propriedades copiadas apenas das que são criáveis ---
     new_properties = {}
-
-    for key, val in props.items():
-        # Se propriedade não tem 'type' (incomum), pule
-        prop_type = val.get("type")
-        if not prop_type or prop_type not in CREATABLE_PROP_TYPES:
+    for key, value in props.items():
+        # ignora campos que serão substituídos manualmente
+        if key in ["Data", "Reuniões relacionadas (recorrência)", "Evento"]:
             continue
 
-        # Evita copiar propriedades que vamos sobrescrever
-        if key in ("Data", "Reuniões relacionadas (recorrência)", "Evento"):
-            continue
+        # limpa campos do tipo "people" (mantém apenas os IDs)
+        if value.get("type") == "people":
+            people_ids = [{"id": p["id"]} for p in value.get("people", [])]
+            new_properties[key] = {"people": people_ids}
+        else:
+            new_properties[key] = value
 
-        # Para títulos/rich_text/select/multi_select/date/people/checkbox/url/email/etc,
-        # o retorno da API costuma já estar no formato aceito - então copiamos 'val[prop_type]'.
-        # Ex.: val = {"id": "...", "type":"select", "select": {"name":"X"}}
-        # Precisamos enviar {"select": {"name":"X"}}
-        try:
-            new_properties[key] = {prop_type: val.get(prop_type)}
-        except Exception:
-            # fallback: tente usar o valor bruto
-            new_properties[key] = val
-
-    # Define a nova data (substitui)
+    # Define título com emoji e nova data
+    new_event = f"{RECURRING_EMOJI} {event}"
+    new_properties["Evento"] = {"title": [{"text": {"content": new_event}}]}
     new_properties["Data"] = {"date": {"start": target_date.isoformat()}}
-
-    # Título: coloca emoji e mantém texto
-    new_title_text = f"{RECURRING_EMOJI} {event_text}"
-    new_properties["Evento"] = {"title": [{"text": {"content": new_title_text}}]}
-
-    # Reuniões relacionadas (recorrência) relation apontando para a origem
     new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
+    new_properties["Recorrência"] = {"select": {"name": recurrence}}
 
-    # Mantém Recorrência se existir
-    if recurrence:
-        new_properties["Recorrência"] = {"select": {"name": recurrence}}
-
-    # POST para criar a página
-    payload = {
-        "parent": {"database_id": DATABASE_ID_REUNIOES},
-        "properties": new_properties
-    }
+    payload = {"parent": {"database_id": DATABASE_ID_REUNIOES}, "properties": new_properties}
 
     r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-    try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        # mostrar erro mais informativo
-        print(f"❌ Erro ao criar instância para '{event_text}' em {target_date}: {r.status_code} {r.text}")
-        raise
-    print(f"✅ Instância criada: {new_title_text} → {target_date}")
+
+    if r.status_code != 200:
+        print(f"❌ Erro ao criar instância para '{event}' em {target_date}: {r.status_code} {r.text}")
+        return None
+
+    print(f"✅ Instância criada: {new_event} → {target_date}")
     return r.json()
 
 
@@ -222,7 +167,7 @@ def main():
     limit_date = today + datetime.timedelta(days=LIMIT_DAYS)
 
     for meeting in meetings:
-        props = meeting.get("properties", {})
+        props = meeting["properties"]
         recurrence_prop = props.get("Recorrência", {}).get("select")
         if not recurrence_prop:
             continue
@@ -236,7 +181,7 @@ def main():
             continue
 
         base_date = datetime.date.fromisoformat(data_prop["start"][:10])
-        event = _get_title_text(props)
+        event = props["Evento"]["title"][0]["plain_text"]
 
         if base_date < today:
             print(f"⏸️ Ignorando '{event}' — data base {base_date} já passou.")
