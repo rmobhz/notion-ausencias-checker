@@ -7,7 +7,7 @@ import traceback
 
 # Config
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
+DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")  # <— fixado para o ambiente de teste
 LIMIT_DAYS = int(os.getenv("RECURRING_LIMIT_DAYS", "30"))
 MAX_MONTHS = os.getenv("RECURRING_MAX_MONTHS", "12")
 MAX_MONTHS = int(MAX_MONTHS) if MAX_MONTHS and MAX_MONTHS.isdigit() else None
@@ -34,17 +34,38 @@ def safe_json(d):
         return str(d)
 
 
-def get_meetings():
-    """Obtém todas as reuniões do banco."""
+def get_all_meetings():
+    """Obtém todas as reuniões, paginando a API até acabar."""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     payload = {"page_size": 100}
-    r = requests.post(url, headers=HEADERS, json=payload)
-    r.raise_for_status()
-    return r.json().get("results", [])
+    results = []
+    page_count = 0
+
+    while True:
+        page_count += 1
+        r = requests.post(url, headers=HEADERS, json=payload)
+        try:
+            r.raise_for_status()
+        except Exception:
+            debug(f"ERRO ao buscar página {page_count}: {r.status_code} {r.text}")
+            raise
+
+        data = r.json()
+        batch = data.get("results", [])
+        results.extend(batch)
+        debug(f"→ Página {page_count}: {len(batch)} reuniões carregadas (total até agora: {len(results)})")
+
+        next_cursor = data.get("next_cursor")
+        if not next_cursor:
+            break
+        payload["start_cursor"] = next_cursor
+
+    debug(f"✅ Total de reuniões carregadas: {len(results)}\n")
+    return results
 
 
 def instance_exists_for_date(base_meeting, date_to_check):
-    """Verifica se já existe uma instância gerada desta 'Reunião original' na data indicada."""
+    """Verifica se já existe instância relacionada na data indicada."""
     page_id = base_meeting["id"]
     date_str = date_to_check.strftime("%Y-%m-%d")
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
@@ -58,18 +79,14 @@ def instance_exists_for_date(base_meeting, date_to_check):
         }
     }
     r = requests.post(url, headers=HEADERS, json=payload)
-    try:
-        r.raise_for_status()
-    except Exception:
-        debug(f"ERROR instance_exists_for_date request failed: {r.status_code} {r.text}")
-        raise
+    r.raise_for_status()
     results = r.json().get("results", [])
-    debug(f"    -> instance_exists_for_date for {date_str}: found {len(results)}")
+    debug(f"    -> instance_exists_for_date({date_str}): {len(results)} resultados")
     return len(results) > 0
 
 
 def check_existing_instance_by_title_date(base_event, date_to_check):
-    """Verifica se já existe qualquer página com mesmo Evento e mesma data (checagem extra)."""
+    """Verifica se já existe qualquer página com mesmo título e data."""
     date_str = date_to_check.strftime("%Y-%m-%d")
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     payload = {
@@ -82,18 +99,13 @@ def check_existing_instance_by_title_date(base_event, date_to_check):
         }
     }
     r = requests.post(url, headers=HEADERS, json=payload)
-    try:
-        r.raise_for_status()
-    except Exception:
-        debug(f"ERROR check_existing_instance_by_title_date request failed: {r.status_code} {r.text}")
-        raise
+    r.raise_for_status()
     results = r.json().get("results", [])
-    debug(f"    -> check_existing_instance_by_title_date for '{base_event}' on {date_str}: found {len(results)}")
+    debug(f"    -> check_existing_instance_by_title_date('{base_event}', {date_str}): {len(results)} resultados")
     return len(results) > 0
 
 
 def create_instance(base_meeting, target_date):
-    """Cria uma nova instância da reunião recorrente (com logs de erro detalhados)."""
     try:
         props = base_meeting["properties"]
         event = props.get("Evento", {}).get("title", [])
@@ -103,7 +115,6 @@ def create_instance(base_meeting, target_date):
 
         debug(f"  -> Tentando criar instância para '{event}' em {target_date} (origem id={page_id})")
 
-        # checagens preventivas (imprimem resultado internamente)
         if instance_exists_for_date(base_meeting, target_date):
             debug(f"     - PULANDO: já existe instância relacionada para {target_date}")
             return None
@@ -129,19 +140,18 @@ def create_instance(base_meeting, target_date):
         debug(f"✅ Instância criada: {new_event} → {target_date}")
         return r.json()
     except Exception as e:
-        debug("Exception in create_instance:", str(e))
+        debug("Exception em create_instance:", str(e))
         traceback.print_exc()
         return None
 
 
 def generate_daily(base_meeting, base_date, today, limit_date):
     start = base_date + datetime.timedelta(days=1)
-    debug(f"  ▶ generate_daily: start={start} limit={limit_date}")
+    debug(f"  ▶ generate_daily: {start} até {limit_date}")
     next_date = start
     while next_date <= limit_date:
-        debug(f"    - considerando {next_date} (weekday={next_date.weekday()})")
         if next_date.weekday() in (5, 6):
-            debug(f"      > pulando fim de semana")
+            debug(f"    - pulando fim de semana ({next_date})")
         else:
             create_instance(base_meeting, next_date)
         next_date += datetime.timedelta(days=1)
@@ -149,89 +159,58 @@ def generate_daily(base_meeting, base_date, today, limit_date):
 
 def generate_weekly(base_meeting, base_date, today, limit_date):
     start = base_date + datetime.timedelta(weeks=1)
-    debug(f"  ▶ generate_weekly: start={start} limit={limit_date}")
+    debug(f"  ▶ generate_weekly: {start} até {limit_date}")
     next_date = start
     while next_date <= limit_date:
-        debug(f"    - considerando {next_date}")
         create_instance(base_meeting, next_date)
         next_date += datetime.timedelta(weeks=1)
 
 
 def generate_monthly(base_meeting, base_date, today, limit_date):
     start = base_date + relativedelta(months=1)
-    debug(f"  ▶ generate_monthly: start={start} limit={limit_date} MAX_MONTHS={MAX_MONTHS}")
+    debug(f"  ▶ generate_monthly: {start} até {limit_date} (MAX_MONTHS={MAX_MONTHS})")
     next_date = start
     months_created = 0
     while next_date <= limit_date:
-        if MAX_MONTHS is not None and months_created >= MAX_MONTHS:
+        if MAX_MONTHS and months_created >= MAX_MONTHS:
             debug(f"    - atingiu MAX_MONTHS ({MAX_MONTHS}), parando.")
             break
-        debug(f"    - considerando {next_date}")
         create_instance(base_meeting, next_date)
         months_created += 1
         next_date += relativedelta(months=1)
 
 
 def main():
-    debug("🔄 Iniciando geração de reuniões recorrentes (modo debug detalhado)...")
-    meetings = get_meetings()
+    debug("🔄 Iniciando rotina com paginação completa...\n")
+    meetings = get_all_meetings()
     today = datetime.date.today()
     limit_date = today + datetime.timedelta(days=LIMIT_DAYS)
-    debug(f"Hoje: {today}  Limit_date: {limit_date} (LIMIT_DAYS={LIMIT_DAYS})\n")
+    debug(f"Hoje: {today} | Limit_date: {limit_date} | Total reuniões: {len(meetings)}\n")
 
     for i, meeting in enumerate(meetings, start=1):
         try:
             props = meeting.get("properties", {})
-            meeting_id = meeting.get("id")
-            debug("=" * 60)
-            debug(f"[{i}] Meeting id: {meeting_id}")
-            debug("Raw properties keys:", list(props.keys()))
-            # print full small summary of relevant props
             recurrence_raw = props.get("Recorrência")
-            data_raw = props.get("Data")
-            evento_raw = props.get("Evento")
-            reuniao_original_raw = props.get("Reunião original")
-
-            debug(" Recorrência raw:", safe_json(recurrence_raw))
-            debug(" Data raw:", safe_json(data_raw))
-            debug(" Evento raw:", safe_json(evento_raw))
-            debug(" Reunião original raw:", safe_json(reuniao_original_raw))
-
             recurrence_prop = recurrence_raw.get("select") if recurrence_raw else None
+
             if not recurrence_prop:
-                debug("  -> Sem propriedade 'Recorrência' selecionada. Pulando.")
                 continue
 
             recurrence_name = recurrence_prop.get("name")
             recurrence_norm = recurrence_name.lower().strip() if recurrence_name else ""
-            debug(f"  -> Recorrência encontrada: raw='{recurrence_name}' normalized='{recurrence_norm}'")
             if recurrence_norm in ("", "nenhuma"):
-                debug("  -> Recorrência vazia ou 'Nenhuma'. Pulando.")
                 continue
 
-            # checa Data
-            data_prop = data_raw.get("date") if data_raw else None
-            if not data_prop or not data_prop.get("start"):
-                debug("  -> Propriedade 'Data' ausente ou sem 'start'. Pulando.")
+            data_raw = props.get("Data", {}).get("date")
+            if not data_raw or not data_raw.get("start"):
                 continue
+            base_date = datetime.date.fromisoformat(data_raw["start"][:10])
 
-            base_date = datetime.date.fromisoformat(data_prop["start"][:10])
-            debug(f"  -> Data base (base_date): {base_date}")
-
-            event = "(sem título)"
-            try:
-                event = evento_raw.get("title", [])[0].get("plain_text", "(sem título)") if evento_raw else "(sem título)"
-            except Exception:
-                debug("  -> Erro ao ler Evento; raw:", safe_json(evento_raw))
-
-            debug(f"  -> Evento: '{event}' (id={meeting_id})")
-
-            # Se base_date > limit_date, pula
             if base_date > limit_date:
-                debug(f"  -> data base {base_date} está além do limite ({limit_date}). Pulando.")
                 continue
 
-            # Escolhe gerador
+            debug(f"\n[{i}] Reunião com recorrência '{recurrence_name}' ({meeting['id']}) | Data base: {base_date}")
+
             if recurrence_norm == "diária":
                 generate_daily(meeting, base_date, today, limit_date)
             elif recurrence_norm == "semanal":
@@ -239,12 +218,13 @@ def main():
             elif recurrence_norm == "mensal":
                 generate_monthly(meeting, base_date, today, limit_date)
             else:
-                debug(f"  -> Tipo de recorrência desconhecido: '{recurrence_name}' (norm='{recurrence_norm}')")
+                debug(f"  -> Tipo de recorrência desconhecido: {recurrence_name}")
+
         except Exception as e:
-            debug("Erro processando meeting:", str(e))
+            debug(f"Erro processando reunião {i}: {e}")
             traceback.print_exc()
 
-    debug("\n🏁 Rotina concluída (debug).")
+    debug("\n🏁 Rotina concluída.")
 
 
 if __name__ == "__main__":
