@@ -132,9 +132,8 @@ def create_instance(base_meeting, target_date):
     try:
         props = base_meeting.get("properties", {})
         event_text = _get_title_text(props)
-        recurrence = props.get("Recorrência", {}).get("select", {}).get("name")
+        page_id = base_meeting["id"]
 
-        # Evita duplicação
         if instance_exists_for_date(base_meeting, target_date):
             debug(f"⚠️ Ignorando (já existe por relação) {event_text} {target_date}")
             return None
@@ -148,7 +147,7 @@ def create_instance(base_meeting, target_date):
             prop_type = val.get("type")
             if not prop_type or prop_type not in CREATABLE_PROP_TYPES:
                 continue
-            if key in ("Data", "Reuniões relacionadas (recorrência)", "Evento"):
+            if key in ("Data", "Reuniões relacionadas (recorrência)", "Evento", "Recorrência"):
                 continue
 
             content = val.get(prop_type)
@@ -156,13 +155,15 @@ def create_instance(base_meeting, target_date):
                 continue
 
             if prop_type == "people":
-                people_ids = [{"id": p.get("id")} for p in (content or []) if p.get("id")]
+                people_list = content or []
+                people_ids = [{"id": p["id"]} for p in people_list if p.get("id")]
                 if people_ids:
                     new_properties[key] = {"people": people_ids}
                 continue
 
             if prop_type == "relation":
-                rel_ids = [{"id": r.get("id")} for r in (content or []) if r.get("id")]
+                rels = content or []
+                rel_ids = [{"id": r["id"]} for r in rels if r.get("id")]
                 if rel_ids:
                     new_properties[key] = {"relation": rel_ids}
                 continue
@@ -172,10 +173,9 @@ def create_instance(base_meeting, target_date):
         new_title_text = f"{RECURRING_EMOJI} {event_text}"
         new_properties["Evento"] = {"title": [{"text": {"content": new_title_text}}]}
         new_properties["Data"] = {"date": {"start": target_date.isoformat()}}
-        # 🔄 Campo vazio conforme pedido
-        new_properties["Reuniões relacionadas (recorrência)"] = {"relation": []}
-        if recurrence:
-            new_properties["Recorrência"] = {"select": {"name": recurrence}}
+        new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
+        # ⚙️ Campo Recorrência agora fica vazio nas instâncias
+        new_properties["Recorrência"] = {"select": None}
 
         payload = {"parent": {"database_id": DATABASE_ID_REUNIOES}, "properties": new_properties}
 
