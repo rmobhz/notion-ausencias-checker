@@ -169,9 +169,42 @@ def create_instance(base_meeting, target_date):
 
             new_properties[key] = {prop_type: content}
 
+        # 🕒 Copiar formato completo de data/hora da reunião original
+        date_prop = props.get("Data", {}).get("date", {})
+        if date_prop:
+            start_str = date_prop.get("start")
+            end_str = date_prop.get("end")
+            time_zone = date_prop.get("time_zone")
+
+            if start_str:
+                # Converte para datetime preservando hora, se houver
+                try:
+                    start_dt = datetime.datetime.fromisoformat(start_str)
+                except Exception:
+                    start_dt = datetime.datetime.fromisoformat(start_str + "T00:00:00")
+                delta = target_date - start_dt.date()
+                new_start = start_dt + datetime.timedelta(days=delta.days)
+                new_start_str = new_start.isoformat()
+
+                new_end_str = None
+                if end_str:
+                    try:
+                        end_dt = datetime.datetime.fromisoformat(end_str)
+                        new_end = end_dt + datetime.timedelta(days=delta.days)
+                        new_end_str = new_end.isoformat()
+                    except Exception:
+                        pass
+
+                new_properties["Data"] = {
+                    "date": {
+                        "start": new_start_str,
+                        "end": new_end_str,
+                        "time_zone": time_zone
+                    }
+                }
+
         # sobrescreve campos principais
         new_properties["Evento"] = {"title": [{"text": {"content": f"{RECURRING_EMOJI} {event_text}"}}]}
-        new_properties["Data"] = {"date": {"start": target_date.isoformat()}}
         new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
         new_properties["Recorrência"] = {"select": None}  # campo vazio nas instâncias
 
