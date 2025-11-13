@@ -22,7 +22,6 @@ HEADERS = {
 
 RECURRING_EMOJI = "🔁"
 
-# Tipos que podemos tentar definir ao criar página
 CREATABLE_PROP_TYPES = {
     "title",
     "rich_text",
@@ -45,7 +44,6 @@ def debug(*args, **kwargs):
 
 
 def get_meetings():
-    """Obtém todas as reuniões do banco, com paginação."""
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     all_results = []
     payload = {"page_size": 100}
@@ -117,33 +115,26 @@ def _get_title_text(props):
 
 
 def _is_non_empty_content(prop_type, content):
-    """Decide se o conteúdo é válido (não vazio) para ser enviado."""
     if content is None:
         return False
-    # lists: require len>0
     if isinstance(content, list):
         return len(content) > 0
-    # dicts: treat empty dict as empty
     if isinstance(content, dict):
         return len(content) > 0
-    # strings: non-empty
     if isinstance(content, str):
         return content.strip() != ""
-    # numbers and booleans: allow 0/False
     if isinstance(content, (int, float, bool)):
         return True
     return True
 
 
 def create_instance(base_meeting, target_date):
-    """Cria instância copiando propriedades válidas e normalizando people/relations."""
     try:
         props = base_meeting.get("properties", {})
         event_text = _get_title_text(props)
         recurrence = props.get("Recorrência", {}).get("select", {}).get("name")
-        page_id = base_meeting["id"]
 
-        # duplicação segura: não recria se já existe
+        # Evita duplicação
         if instance_exists_for_date(base_meeting, target_date):
             debug(f"⚠️ Ignorando (já existe por relação) {event_text} {target_date}")
             return None
@@ -154,58 +145,35 @@ def create_instance(base_meeting, target_date):
         new_properties = {}
 
         for key, val in props.items():
-            # val is the property object returned by Notion
             prop_type = val.get("type")
             if not prop_type or prop_type not in CREATABLE_PROP_TYPES:
-                # pula propriedades não-criáveis (formula, rollup, created_time, etc.)
                 continue
-
-            # não copie campos que vamos sobrescrever
             if key in ("Data", "Reuniões relacionadas (recorrência)", "Evento"):
                 continue
 
             content = val.get(prop_type)
-
-            # se conteúdo vazio/None, não inclua no payload
             if not _is_non_empty_content(prop_type, content):
                 continue
 
-            # especial: people -> enviar apenas ids
             if prop_type == "people":
-                people_list = content or []
-                people_ids = []
-                for p in people_list:
-                    # a API do banco retorna pessoas com 'id' quando são usuários do workspace
-                    pid = p.get("id")
-                    if pid:
-                        people_ids.append({"id": pid})
+                people_ids = [{"id": p.get("id")} for p in (content or []) if p.get("id")]
                 if people_ids:
                     new_properties[key] = {"people": people_ids}
-                # se ficou vazio, não adiciona
                 continue
 
-            # special: relation -> keep list of {"id": ...} if present
             if prop_type == "relation":
-                rels = content or []
-                rel_ids = []
-                for ritem in rels:
-                    rid = ritem.get("id")
-                    if rid:
-                        rel_ids.append({"id": rid})
+                rel_ids = [{"id": r.get("id")} for r in (content or []) if r.get("id")]
                 if rel_ids:
                     new_properties[key] = {"relation": rel_ids}
                 continue
 
-            # multi_select/select/date/number/checkbox/url/email/phone_number/files/rich_text/title
-            # For these, content is usually already in the shape expected by the API, so include it.
-            # But ensure it's not None/empty (checked above).
             new_properties[key] = {prop_type: content}
 
-        # sobrescreve os campos obrigatórios/ajustados
         new_title_text = f"{RECURRING_EMOJI} {event_text}"
         new_properties["Evento"] = {"title": [{"text": {"content": new_title_text}}]}
         new_properties["Data"] = {"date": {"start": target_date.isoformat()}}
-        new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
+        # 🔄 Campo vazio conforme pedido
+        new_properties["Reuniões relacionadas (recorrência)"] = {"relation": []}
         if recurrence:
             new_properties["Recorrência"] = {"select": {"name": recurrence}}
 
@@ -213,7 +181,6 @@ def create_instance(base_meeting, target_date):
 
         r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
         if r.status_code not in (200, 201):
-            # imprime erro detalhado e devolve None sem quebrar tudo
             debug(f"❌ Erro ao criar instância para '{event_text}' em {target_date}: {r.status_code} {r.text}")
             return None
 
@@ -229,9 +196,6 @@ def create_instance(base_meeting, target_date):
 def generate_daily(base_meeting, base_date, today, limit_date):
     next_date = base_date + datetime.timedelta(days=1)
     while next_date <= limit_date:
-        if next_date <= today:
-            next_date += datetime.timedelta(days=1)
-            continue
         if next_date.weekday() in (5, 6):
             debug(f"⏭️ Pulando fim de semana: {next_date}")
             next_date += datetime.timedelta(days=1)
@@ -243,8 +207,7 @@ def generate_daily(base_meeting, base_date, today, limit_date):
 def generate_weekly(base_meeting, base_date, today, limit_date):
     next_date = base_date + datetime.timedelta(weeks=1)
     while next_date <= limit_date:
-        if next_date > today:
-            create_instance(base_meeting, next_date)
+        create_instance(base_meeting, next_date)
         next_date += datetime.timedelta(weeks=1)
 
 
@@ -254,9 +217,8 @@ def generate_monthly(base_meeting, base_date, today, limit_date):
     while next_date <= limit_date:
         if MAX_MONTHS is not None and months_created >= MAX_MONTHS:
             break
-        if next_date > today:
-            create_instance(base_meeting, next_date)
-            months_created += 1
+        create_instance(base_meeting, next_date)
+        months_created += 1
         next_date += relativedelta(months=1)
 
 
@@ -285,7 +247,6 @@ def main():
             base_date = datetime.date.fromisoformat(data_prop["start"][:10])
             event = _get_title_text(props)
 
-            # aceita base_date == today (não pula)
             if base_date > limit_date:
                 debug(f"⏸️ Ignorando '{event}' — data base {base_date} além do limite.")
                 continue
