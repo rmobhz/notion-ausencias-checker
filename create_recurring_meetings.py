@@ -188,28 +188,11 @@ def create_instance(base_meeting, target_date):
         return None
 
 
-def generate_daily(base_meeting, base_date):
-    limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
-    next_date = base_date + datetime.timedelta(days=1)
-    while next_date <= limit_date:
-        create_instance(base_meeting, next_date)
-        next_date += datetime.timedelta(days=1)
-
-
-def generate_weekly(base_meeting, base_date):
-    limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
-    next_date = base_date + datetime.timedelta(weeks=1)
-    while next_date <= limit_date:
-        create_instance(base_meeting, next_date)
-        next_date += datetime.timedelta(weeks=1)
-
-
-def generate_monthly(base_meeting, base_date):
-    limit_date = base_date + relativedelta(months=MAX_MONTHS)
-    next_date = base_date + relativedelta(months=1)
-    while next_date <= limit_date:
-        create_instance(base_meeting, next_date)
-        next_date += relativedelta(months=1)
+def count_related_instances(base_meeting):
+    """Conta as instâncias já relacionadas à reunião original."""
+    props = base_meeting.get("properties", {})
+    rels = props.get("Reuniões relacionadas (recorrência)", {}).get("relation", [])
+    return len(rels)
 
 
 def main():
@@ -233,6 +216,28 @@ def main():
                 continue
             base_date = datetime.date.fromisoformat(data_prop["start"][:10])
             event = _get_title_text(props)
+
+            relacionadas = props.get("Reuniões relacionadas (recorrência)", {}).get("relation", [])
+            existentes = len(relacionadas)
+
+            # Calcula total esperado de instâncias
+            if recurrence == "diária":
+                # conta apenas dias úteis dentro de 30 dias
+                total_esperado = sum(
+                    1
+                    for i in range(1, LIMIT_DAYS + 1)
+                    if (base_date + datetime.timedelta(days=i)).weekday() < 5
+                )
+            elif recurrence == "semanal":
+                total_esperado = 4
+            elif recurrence == "mensal":
+                total_esperado = MAX_MONTHS
+            else:
+                total_esperado = 0
+
+            if existentes >= total_esperado:
+                debug(f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias. Nenhuma nova será criada.")
+                continue
 
             debug(f"\n🔁 {event} — recorrência: {recurrence} — base: {base_date}")
 
