@@ -188,6 +188,35 @@ def create_instance(base_meeting, target_date):
         return None
 
 
+def generate_daily(base_meeting, base_date):
+    limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
+    next_date = base_date + datetime.timedelta(days=1)
+    while next_date <= limit_date:
+        create_instance(base_meeting, next_date)
+        next_date += datetime.timedelta(days=1)
+
+
+def generate_weekly(base_meeting, base_date):
+    limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
+    next_date = base_date + datetime.timedelta(weeks=1)
+    while next_date <= limit_date:
+        create_instance(base_meeting, next_date)
+        next_date += datetime.timedelta(weeks=1)
+
+
+# ---------- garante definição de generate_monthly ----------
+def generate_monthly(base_meeting, base_date):
+    """
+    Gera instâncias mensais por MAX_MONTHS meses a partir da base_date.
+    """
+    limit_date = base_date + relativedelta(months=MAX_MONTHS)
+    next_date = base_date + relativedelta(months=1)
+    while next_date <= limit_date:
+        create_instance(base_meeting, next_date)
+        next_date += relativedelta(months=1)
+# ----------------------------------------------------------
+
+
 def count_related_instances(base_meeting):
     """Conta as instâncias já relacionadas à reunião original."""
     props = base_meeting.get("properties", {})
