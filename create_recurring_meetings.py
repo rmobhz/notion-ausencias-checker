@@ -74,7 +74,8 @@ def instance_exists_for_date(base_meeting, date_to_check):
                 {"property": "Data", "date": {"on_or_after": date_str}},
                 {"property": "Data", "date": {"on_or_before": date_str}}
             ]
-        }
+        },
+        "page_size": 1
     }
     r = requests.post(url, headers=HEADERS, json=payload)
     r.raise_for_status()
@@ -93,7 +94,8 @@ def check_existing_instance_by_title_date(base_event, date_to_check):
                 {"property": "Data", "date": {"on_or_after": date_str}},
                 {"property": "Data", "date": {"on_or_before": date_str}}
             ]
-        }
+        },
+        "page_size": 1
     }
     r = requests.post(url, headers=HEADERS, json=payload)
     r.raise_for_status()
@@ -214,6 +216,38 @@ def generate_monthly(base_meeting, base_date):
         next_date += relativedelta(months=1)
 
 
+def count_related_instances_via_query(base_meeting):
+    """
+    Conta quantas páginas na base têm a relação apontando para a reunião original.
+    Usa uma query ao banco para garantir contagem correta mesmo que a propriedade
+    dentro da página original não reflita tudo.
+    """
+    page_id = base_meeting["id"]
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
+    all_results = []
+    payload = {
+        "filter": {
+            "property": "Reuniões relacionadas (recorrência)",
+            "relation": {"contains": page_id}
+        },
+        "page_size": 100
+    }
+    next_cursor = None
+    while True:
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+        r = requests.post(url, headers=HEADERS, json=payload)
+        r.raise_for_status()
+        data = r.json()
+        batch = data.get("results", [])
+        all_results.extend(batch)
+        next_cursor = data.get("next_cursor")
+        if not next_cursor:
+            break
+    debug(f"    count_related_instances_via_query -> {len(all_results)}")
+    return len(all_results)
+
+
 def main():
     debug("🔄 Iniciando geração de reuniões recorrentes...")
     meetings = get_meetings()
@@ -236,9 +270,8 @@ def main():
             base_date = datetime.date.fromisoformat(data_prop["start"][:10])
             event = _get_title_text(props)
 
-            # ----- CONTAGEM SIMPLES -----
-            relacionadas = props.get("Reuniões relacionadas (recorrência)", {}).get("relation", [])
-            existentes = len(relacionadas)
+            # ----- CONTAGEM VIA QUERY: confere instâncias que apontam para a original -----
+            existentes = count_related_instances_via_query(meeting)
 
             if recurrence == "diária":
                 total_esperado = sum(
@@ -254,9 +287,9 @@ def main():
                 total_esperado = 0
 
             if existentes >= total_esperado:
-                debug(f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias relacionadas. Nenhuma nova será criada.")
+                debug(f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias relacionadas (via query). Nenhuma nova será criada.")
                 continue
-            # -----------------------------
+            # ------------------------------------------------------------------------------
 
             debug(f"\n🔁 {event} — recorrência: {recurrence} — base: {base_date} ({existentes}/{total_esperado} criadas)")
 
