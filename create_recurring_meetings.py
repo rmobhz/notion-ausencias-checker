@@ -42,6 +42,26 @@ def debug(*args):
     print(*args)
 
 
+# ============================================
+# 🕒 FUNÇÃO NOVA — FIX TIMEZONE
+# ============================================
+def fix_timezone(start_str):
+    """Converte datetime ISO do Notion para America/Sao_Paulo preservando a data real."""
+    try:
+        dt = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+    except:
+        # Se veio apenas YYYY-MM-DD
+        dt = datetime.datetime.fromisoformat(start_str + "T00:00:00+00:00")
+
+    # Se veio sem tzinfo → assume UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+
+    # Converte para America/Sao_Paulo
+    sp = datetime.timezone(datetime.timedelta(hours=-3))
+    return dt.astimezone(sp)
+
+
 def get_meetings():
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     all_results = []
@@ -169,7 +189,7 @@ def create_instance(base_meeting, target_date):
 
             new_properties[key] = {prop_type: content}
 
-        # 🕒 Copiar formato completo de data/hora da reunião original
+        # 🕒 Ajuste de timezone ao copiar a data
         date_prop = props.get("Data", {}).get("date", {})
         if date_prop:
             start_str = date_prop.get("start")
@@ -177,36 +197,29 @@ def create_instance(base_meeting, target_date):
             time_zone = date_prop.get("time_zone")
 
             if start_str:
-                # Converte para datetime preservando hora, se houver
-                try:
-                    start_dt = datetime.datetime.fromisoformat(start_str)
-                except Exception:
-                    start_dt = datetime.datetime.fromisoformat(start_str + "T00:00:00")
-                delta = target_date - start_dt.date()
-                new_start = start_dt + datetime.timedelta(days=delta.days)
+                # Corrige o timezone
+                start_dt = fix_timezone(start_str)
+                new_start = start_dt + datetime.timedelta(days=(target_date - start_dt.date()).days)
                 new_start_str = new_start.isoformat()
 
                 new_end_str = None
                 if end_str:
-                    try:
-                        end_dt = datetime.datetime.fromisoformat(end_str)
-                        new_end = end_dt + datetime.timedelta(days=delta.days)
-                        new_end_str = new_end.isoformat()
-                    except Exception:
-                        pass
+                    end_dt = fix_timezone(end_str)
+                    new_end = end_dt + datetime.timedelta(days=(target_date - start_dt.date()).days)
+                    new_end_str = new_end.isoformat()
 
                 new_properties["Data"] = {
                     "date": {
                         "start": new_start_str,
                         "end": new_end_str,
-                        "time_zone": time_zone
+                        "time_zone": "America/Sao_Paulo"
                     }
                 }
 
         # sobrescreve campos principais
         new_properties["Evento"] = {"title": [{"text": {"content": f"{RECURRING_EMOJI} {event_text}"}}]}
         new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
-        new_properties["Recorrência"] = {"select": None}  # campo vazio nas instâncias
+        new_properties["Recorrência"] = {"select": None}
 
         payload = {"parent": {"database_id": DATABASE_ID_REUNIOES}, "properties": new_properties}
         r = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
@@ -227,7 +240,6 @@ def generate_daily(base_meeting, base_date):
     limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
     next_date = base_date + datetime.timedelta(days=1)
     while next_date <= limit_date:
-        # pula fins de semana
         if next_date.weekday() < 5:
             create_instance(base_meeting, next_date)
         next_date += datetime.timedelta(days=1)
@@ -250,11 +262,6 @@ def generate_monthly(base_meeting, base_date):
 
 
 def count_related_instances_via_query(base_meeting):
-    """
-    Conta quantas páginas na base têm a relação apontando para a reunião original.
-    Usa uma query ao banco para garantir contagem correta mesmo que a propriedade
-    dentro da página original não reflita tudo.
-    """
     page_id = base_meeting["id"]
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     all_results = []
@@ -266,6 +273,7 @@ def count_related_instances_via_query(base_meeting):
         "page_size": 100
     }
     next_cursor = None
+
     while True:
         if next_cursor:
             payload["start_cursor"] = next_cursor
@@ -277,6 +285,7 @@ def count_related_instances_via_query(base_meeting):
         next_cursor = data.get("next_cursor")
         if not next_cursor:
             break
+
     debug(f"    count_related_instances_via_query -> {len(all_results)}")
     return len(all_results)
 
@@ -300,10 +309,15 @@ def main():
             data_prop = props.get("Data", {}).get("date")
             if not data_prop or not data_prop.get("start"):
                 continue
-            base_date = datetime.date.fromisoformat(data_prop["start"][:10])
+
+            # ==========================================
+            # 🕒 AQUI ESTÁ A CORREÇÃO DE TIMEZONE
+            # ==========================================
+            start_fixed = fix_timezone(data_prop["start"])
+            base_date = start_fixed.date()
+
             event = _get_title_text(props)
 
-            # ----- CONTAGEM VIA QUERY: confere instâncias que apontam para a original -----
             existentes = count_related_instances_via_query(meeting)
 
             if recurrence == "diária":
@@ -320,9 +334,10 @@ def main():
                 total_esperado = 0
 
             if existentes >= total_esperado:
-                debug(f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias relacionadas (via query). Nenhuma nova será criada.")
+                debug(
+                    f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias relacionadas (via query)."
+                )
                 continue
-            # ------------------------------------------------------------------------------
 
             debug(f"\n🔁 {event} — recorrência: {recurrence} — base: {base_date} ({existentes}/{total_esperado} criadas)")
 
@@ -332,8 +347,6 @@ def main():
                 generate_weekly(meeting, base_date)
             elif recurrence == "mensal":
                 generate_monthly(meeting, base_date)
-            else:
-                debug(f"⚠️ Tipo desconhecido: {recurrence}")
 
         except Exception as e:
             debug(f"Erro no loop principal: {e}")
