@@ -50,14 +50,11 @@ def fix_timezone(start_str):
     try:
         dt = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
     except:
-        # Se veio apenas YYYY-MM-DD
         dt = datetime.datetime.fromisoformat(start_str + "T00:00:00+00:00")
 
-    # Se veio sem tzinfo → assume UTC
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
 
-    # Converte para America/Sao_Paulo
     sp = datetime.timezone(datetime.timedelta(hours=-3))
     return dt.astimezone(sp)
 
@@ -148,13 +145,15 @@ def _is_non_empty_content(prop_type, content):
     return True
 
 
+# =====================================================
+# 🔧 AQUI A CORREÇÃO FOI APLICADA
+# =====================================================
 def create_instance(base_meeting, target_date):
     try:
         props = base_meeting.get("properties", {})
         event_text = _get_title_text(props)
         page_id = base_meeting["id"]
 
-        # Evita duplicações
         if instance_exists_for_date(base_meeting, target_date):
             debug(f"⚠️ Ignorando (já existe) {event_text} {target_date}")
             return None
@@ -189,34 +188,16 @@ def create_instance(base_meeting, target_date):
 
             new_properties[key] = {prop_type: content}
 
-        # 🕒 Ajuste de timezone ao copiar a data
-        date_prop = props.get("Data", {}).get("date", {})
-        if date_prop:
-            start_str = date_prop.get("start")
-            end_str = date_prop.get("end")
-            time_zone = date_prop.get("time_zone")
+        # =====================================================
+        # 🕒 CORREÇÃO AQUI: datas SEM timezone
+        # =====================================================
+        new_properties["Data"] = {
+            "date": {
+                "start": target_date.strftime("%Y-%m-%d"),  # <- sem hora e sem tz
+                "end": None
+            }
+        }
 
-            if start_str:
-                # Corrige o timezone
-                start_dt = fix_timezone(start_str)
-                new_start = start_dt + datetime.timedelta(days=(target_date - start_dt.date()).days)
-                new_start_str = new_start.isoformat()
-
-                new_end_str = None
-                if end_str:
-                    end_dt = fix_timezone(end_str)
-                    new_end = end_dt + datetime.timedelta(days=(target_date - start_dt.date()).days)
-                    new_end_str = new_end.isoformat()
-
-                new_properties["Data"] = {
-                    "date": {
-                        "start": new_start_str,
-                        "end": new_end_str,
-                        "time_zone": "America/Sao_Paulo"
-                    }
-                }
-
-        # sobrescreve campos principais
         new_properties["Evento"] = {"title": [{"text": {"content": f"{RECURRING_EMOJI} {event_text}"}}]}
         new_properties["Reuniões relacionadas (recorrência)"] = {"relation": [{"id": page_id}]}
         new_properties["Recorrência"] = {"select": None}
@@ -248,7 +229,7 @@ def generate_daily(base_meeting, base_date):
 def generate_weekly(base_meeting, base_date):
     limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
     next_date = base_date + datetime.timedelta(weeks=1)
-    while next_date <= limit_date:
+    while next_date <= limit_size:
         create_instance(base_meeting, next_date)
         next_date += datetime.timedelta(weeks=1)
 
@@ -310,14 +291,10 @@ def main():
             if not data_prop or not data_prop.get("start"):
                 continue
 
-            # ==========================================
-            # 🕒 AQUI ESTÁ A CORREÇÃO DE TIMEZONE
-            # ==========================================
             start_fixed = fix_timezone(data_prop["start"])
             base_date = start_fixed.date()
 
             event = _get_title_text(props)
-
             existentes = count_related_instances_via_query(meeting)
 
             if recurrence == "diária":
@@ -334,9 +311,7 @@ def main():
                 total_esperado = 0
 
             if existentes >= total_esperado:
-                debug(
-                    f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias relacionadas (via query)."
-                )
+                debug(f"🔹 {event} ({recurrence}) já tem {existentes}/{total_esperado} instâncias relacionadas (via query).")
                 continue
 
             debug(f"\n🔁 {event} — recorrência: {recurrence} — base: {base_date} ({existentes}/{total_esperado} criadas)")
