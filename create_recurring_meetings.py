@@ -229,7 +229,7 @@ def generate_daily(base_meeting, base_date):
 def generate_weekly(base_meeting, base_date):
     limit_date = base_date + datetime.timedelta(days=LIMIT_DAYS)
     next_date = base_date + datetime.timedelta(weeks=1)
-    while next_date <= limit_size:
+    while next_date <= limit_date:
         create_instance(base_meeting, next_date)
         next_date += datetime.timedelta(weeks=1)
 
