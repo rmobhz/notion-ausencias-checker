@@ -1,4 +1,5 @@
 import os
+import re
 import datetime
 import requests
 from dateutil.relativedelta import relativedelta
@@ -43,20 +44,38 @@ def debug(*args):
 
 
 # ============================================
-# 🕒 FUNÇÃO NOVA — FIX TIMEZONE
+# 🕒 FUNÇÃO NOVA — NORMALIZAÇÃO DE DATA DO NOTION
 # ============================================
-def fix_timezone(start_str):
-    """Converte datetime ISO do Notion para America/Sao_Paulo preservando a data real."""
+def normalize_notion_date(start_str):
+    """
+    Retorna um datetime.date correto a partir da string 'start' do Notion.
+
+    Regras:
+    - Se a string for somente 'YYYY-MM-DD' (data sem hora), interpreta como data LOCAL (sem conversão UTC).
+      Isso evita que '2025-11-24' vire 2025-11-23 ao converter via UTC.
+    - Se a string contém hora (ex.: '2025-11-24T00:00:00Z' ou com offset), interpreta/parseia e converte
+      para America/Sao_Paulo antes de extrair a .date().
+    """
+    if not start_str:
+        return None
+
+    # Caso data pura 'YYYY-MM-DD' -> usa diretamente (é o que o usuário vê no Notion)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_str):
+        return datetime.date.fromisoformat(start_str)
+
+    # Caso contenha hora/offset -> parse e converte para -03:00
     try:
+        # fromisoformat não aceita 'Z', substituímos por +00:00
         dt = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-    except:
-        dt = datetime.datetime.fromisoformat(start_str + "T00:00:00+00:00")
+    except Exception:
+        # fallback: assume midnight UTC
+        dt = datetime.datetime.fromisoformat(start_str.split("T")[0] + "T00:00:00+00:00")
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
 
     sp = datetime.timezone(datetime.timedelta(hours=-3))
-    return dt.astimezone(sp)
+    return dt.astimezone(sp).date()
 
 
 def get_meetings():
@@ -189,7 +208,7 @@ def create_instance(base_meeting, target_date):
             new_properties[key] = {prop_type: content}
 
         # =====================================================
-        # 🕒 CORREÇÃO AQUI: datas SEM timezone
+        # 🕒 CORREÇÃO AQUI: datas SEM timezone (formato aceito pelo Notion)
         # =====================================================
         new_properties["Data"] = {
             "date": {
@@ -291,8 +310,10 @@ def main():
             if not data_prop or not data_prop.get("start"):
                 continue
 
-            start_fixed = fix_timezone(data_prop["start"])
-            base_date = start_fixed.date()
+            # ==========================================
+            # 🕒 AQUI ESTÁ A CORREÇÃO DE TIMEZONE + normalização
+            # ==========================================
+            base_date = normalize_notion_date(data_prop["start"])
 
             event = _get_title_text(props)
             existentes = count_related_instances_via_query(meeting)
