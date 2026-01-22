@@ -13,6 +13,7 @@ DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
 # 🧮 Limite padrão de geração
 LIMIT_DAYS = 30
 MAX_MONTHS = 12
+BIWEEKLY_MONTHS = 6  # ✅ NOVO: quinzenais pelos próximos 6 meses
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -261,6 +262,15 @@ def generate_monthly(base_meeting, base_date):
         next_date += relativedelta(months=1)
 
 
+# ✅ NOVO: quinzenais a cada 2 semanas pelos próximos 6 meses
+def generate_biweekly(base_meeting, base_date):
+    limit_date = base_date + relativedelta(months=BIWEEKLY_MONTHS)
+    next_date = base_date + datetime.timedelta(weeks=2)
+    while next_date <= limit_date:
+        create_instance(base_meeting, next_date)
+        next_date += datetime.timedelta(weeks=2)
+
+
 def count_related_instances_via_query(base_meeting):
     page_id = base_meeting["id"]
     url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
@@ -328,6 +338,14 @@ def main():
                 total_esperado = 4
             elif recurrence == "mensal":
                 total_esperado = MAX_MONTHS
+            elif recurrence in ("quinzenal", "quinzenais"):
+                # ✅ NOVO: total esperado (a cada 2 semanas) pelos próximos 6 meses
+                limit_date = base_date + relativedelta(months=BIWEEKLY_MONTHS)
+                total_esperado = 0
+                next_date = base_date + datetime.timedelta(weeks=2)
+                while next_date <= limit_date:
+                    total_esperado += 1
+                    next_date += datetime.timedelta(weeks=2)
             else:
                 total_esperado = 0
 
@@ -343,6 +361,8 @@ def main():
                 generate_weekly(meeting, base_date)
             elif recurrence == "mensal":
                 generate_monthly(meeting, base_date)
+            elif recurrence in ("quinzenal", "quinzenais"):
+                generate_biweekly(meeting, base_date)
 
         except Exception as e:
             debug(f"Erro no loop principal: {e}")
