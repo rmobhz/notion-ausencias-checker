@@ -8,7 +8,7 @@ import json
 
 # 🔐 Variáveis de ambiente
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
+DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
 
 # 🧮 Limite padrão de geração
 LIMIT_DAYS = 30
