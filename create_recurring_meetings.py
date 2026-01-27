@@ -48,28 +48,15 @@ def debug(*args):
 # 🕒 FUNÇÃO NOVA — NORMALIZAÇÃO DE DATA DO NOTION
 # ============================================
 def normalize_notion_date(start_str):
-    """
-    Retorna um datetime.date correto a partir da string 'start' do Notion.
-
-    Regras:
-    - Se a string for somente 'YYYY-MM-DD' (data sem hora), interpreta como data LOCAL (sem conversão UTC).
-      Isso evita que '2025-11-24' vire 2025-11-23 ao converter via UTC.
-    - Se a string contém hora (ex.: '2025-11-24T00:00:00Z' ou com offset), interpreta/parseia e converte
-      para America/Sao_Paulo antes de extrair a .date().
-    """
     if not start_str:
         return None
 
-    # Caso data pura 'YYYY-MM-DD' -> usa diretamente (é o que o usuário vê no Notion)
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_str):
         return datetime.date.fromisoformat(start_str)
 
-    # Caso contenha hora/offset -> parse e converte para -03:00
     try:
-        # fromisoformat não aceita 'Z', substituímos por +00:00
         dt = datetime.datetime.fromisoformat(start_str.replace("Z", "+00:00"))
     except Exception:
-        # fallback: assume midnight UTC
         dt = datetime.datetime.fromisoformat(start_str.split("T")[0] + "T00:00:00+00:00")
 
     if dt.tzinfo is None:
@@ -79,23 +66,31 @@ def normalize_notion_date(start_str):
     return dt.astimezone(sp).date()
 
 
-# ✅ NOVO: evita herdar ⚠️/(Ausências: ...) e 🔁 no título das instâncias geradas
+# ✅ NOVO (corrigido): evita herdar ⚠️/(Ausências: ...) e 🔁 no título das instâncias geradas
 def sanitize_event_title_for_recurrence(title: str) -> str:
     """
     Remove marcações de conflito/ausência do título base para não "herdar" nas cópias.
-    - Remove prefixos ⚠️ e 🔁 repetidos (em qualquer ordem)
+    Lida com emojis com/sem variation selector (U+FE0F) e espaços NBSP.
+    - Remove prefixos ⚠/⚠️ e 🔁/🔁 (repetidos, em qualquer ordem)
     - Remove sufixo (Ausentes: ...) ou (Ausências: ...)
     """
     if not title:
         return "(sem título)"
 
-    t = title.strip()
+    t = title
+
+    # normaliza NBSP -> espaço normal, e trim
+    t = t.replace("\u00A0", " ").strip()
 
     # remove sufixo de ausências
     t = re.sub(r"\s*\((Ausentes|Ausências):.*?\)\s*$", "", t).strip()
 
-    # remove prefixos repetidos (⚠️ e/ou 🔁)
-    t = re.sub(r"^\s*(?:(?:⚠️|🔁)\s*)+", "", t).strip()
+    # emojis com ou sem variation selector
+    warn = r"⚠\uFE0F?"      # ⚠ ou ⚠️
+    rec  = r"🔁\uFE0F?"      # 🔁 (caso exista variação)
+
+    # remove prefixos repetidos (⚠/⚠️ e/ou 🔁/🔁) com espaços entre eles
+    t = re.sub(rf"^\s*(?:({warn}|{rec})\s*)+", "", t).strip()
 
     return t or "(sem título)"
 
@@ -186,14 +181,12 @@ def _is_non_empty_content(prop_type, content):
     return True
 
 
-# =====================================================
-# 🔧 AQUI A CORREÇÃO FOI APLICADA
-# =====================================================
 def create_instance(base_meeting, target_date):
     try:
         props = base_meeting.get("properties", {})
         event_text_raw = _get_title_text(props)
-        event_text = sanitize_event_title_for_recurrence(event_text_raw)  # ✅ corrige herança de ⚠️/(Ausências)/🔁
+        event_text = sanitize_event_title_for_recurrence(event_text_raw)  # ✅ aqui
+
         page_id = base_meeting["id"]
 
         if instance_exists_for_date(base_meeting, target_date):
@@ -230,12 +223,9 @@ def create_instance(base_meeting, target_date):
 
             new_properties[key] = {prop_type: content}
 
-        # =====================================================
-        # 🕒 CORREÇÃO AQUI: datas SEM timezone (formato aceito pelo Notion)
-        # =====================================================
         new_properties["Data"] = {
             "date": {
-                "start": target_date.strftime("%Y-%m-%d"),  # <- sem hora e sem tz
+                "start": target_date.strftime("%Y-%m-%d"),
                 "end": None
             }
         }
@@ -284,7 +274,6 @@ def generate_monthly(base_meeting, base_date):
         next_date += relativedelta(months=1)
 
 
-# ✅ quinzenais a cada 2 semanas pelos próximos 6 meses
 def generate_biweekly(base_meeting, base_date):
     limit_date = base_date + relativedelta(months=BIWEEKLY_MONTHS)
     next_date = base_date + datetime.timedelta(weeks=2)
@@ -342,9 +331,6 @@ def main():
             if not data_prop or not data_prop.get("start"):
                 continue
 
-            # ==========================================
-            # 🕒 AQUI ESTÁ A CORREÇÃO DE TIMEZONE + normalização
-            # ==========================================
             base_date = normalize_notion_date(data_prop["start"])
 
             event = _get_title_text(props)
