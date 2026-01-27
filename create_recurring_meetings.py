@@ -8,12 +8,12 @@ import json
 
 # 🔐 Variáveis de ambiente
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
+DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
 
 # 🧮 Limite padrão de geração
 LIMIT_DAYS = 30
 MAX_MONTHS = 12
-BIWEEKLY_MONTHS = 6  # ✅ NOVO: quinzenais pelos próximos 6 meses
+BIWEEKLY_MONTHS = 6  # ✅ quinzenais pelos próximos 6 meses
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -77,6 +77,27 @@ def normalize_notion_date(start_str):
 
     sp = datetime.timezone(datetime.timedelta(hours=-3))
     return dt.astimezone(sp).date()
+
+
+# ✅ NOVO: evita herdar ⚠️/(Ausências: ...) e 🔁 no título das instâncias geradas
+def sanitize_event_title_for_recurrence(title: str) -> str:
+    """
+    Remove marcações de conflito/ausência do título base para não "herdar" nas cópias.
+    - Remove prefixos ⚠️ e 🔁 repetidos (em qualquer ordem)
+    - Remove sufixo (Ausentes: ...) ou (Ausências: ...)
+    """
+    if not title:
+        return "(sem título)"
+
+    t = title.strip()
+
+    # remove sufixo de ausências
+    t = re.sub(r"\s*\((Ausentes|Ausências):.*?\)\s*$", "", t).strip()
+
+    # remove prefixos repetidos (⚠️ e/ou 🔁)
+    t = re.sub(r"^\s*(?:(?:⚠️|🔁)\s*)+", "", t).strip()
+
+    return t or "(sem título)"
 
 
 def get_meetings():
@@ -171,7 +192,8 @@ def _is_non_empty_content(prop_type, content):
 def create_instance(base_meeting, target_date):
     try:
         props = base_meeting.get("properties", {})
-        event_text = _get_title_text(props)
+        event_text_raw = _get_title_text(props)
+        event_text = sanitize_event_title_for_recurrence(event_text_raw)  # ✅ corrige herança de ⚠️/(Ausências)/🔁
         page_id = base_meeting["id"]
 
         if instance_exists_for_date(base_meeting, target_date):
@@ -255,48 +277,14 @@ def generate_weekly(base_meeting, base_date):
 
 
 def generate_monthly(base_meeting, base_date):
-    """
-    Cria reuniões mensais no mesmo padrão de dia da semana.
-    Exemplo: se a base é a 2ª terça-feira do mês,
-    todas as próximas serão na 2ª terça-feira.
-    """
-
-    # Descobre qual "posição" no mês a data original ocupa
-    # Ex.: 2ª terça, 1ª sexta, última quarta etc.
-    weekday = base_date.weekday()  # 0=segunda ... 6=domingo
-
-    # índice da semana no mês (1ª, 2ª, 3ª, 4ª...)
-    week_index = (base_date.day - 1) // 7  
-
     limit_date = base_date + relativedelta(months=MAX_MONTHS)
-    current = base_date
-
-    for i in range(1, MAX_MONTHS + 1):
-        # Vai para o primeiro dia do próximo mês
-        first_day_next_month = (current + relativedelta(months=1)).replace(day=1)
-
-        # Encontra o primeiro weekday desejado no mês
-        days_ahead = (weekday - first_day_next_month.weekday()) % 7
-        first_occurrence = first_day_next_month + datetime.timedelta(days=days_ahead)
-
-        # Soma semanas até atingir mesma posição da reunião original
-        target_date = first_occurrence + datetime.timedelta(weeks=week_index)
-
-        # Se passar do mês (ex.: "5ª segunda" num mês que só tem 4)
-        # então usa a última ocorrência do weekday no mês
-        if target_date.month != first_day_next_month.month:
-            last_day = first_day_next_month + relativedelta(months=1, days=-1)
-            days_back = (last_day.weekday() - weekday) % 7
-            target_date = last_day - datetime.timedelta(days=days_back)
-
-        if target_date > limit_date:
-            break
-
-        create_instance(base_meeting, target_date)
-        current = target_date
+    next_date = base_date + relativedelta(months=1)
+    while next_date <= limit_date:
+        create_instance(base_meeting, next_date)
+        next_date += relativedelta(months=1)
 
 
-# Quinzenais a cada 2 semanas pelos próximos 6 meses
+# ✅ quinzenais a cada 2 semanas pelos próximos 6 meses
 def generate_biweekly(base_meeting, base_date):
     limit_date = base_date + relativedelta(months=BIWEEKLY_MONTHS)
     next_date = base_date + datetime.timedelta(weeks=2)
@@ -373,7 +361,6 @@ def main():
             elif recurrence == "mensal":
                 total_esperado = MAX_MONTHS
             elif recurrence in ("quinzenal", "quinzenais"):
-                # ✅ NOVO: total esperado (a cada 2 semanas) pelos próximos 6 meses
                 limit_date = base_date + relativedelta(months=BIWEEKLY_MONTHS)
                 total_esperado = 0
                 next_date = base_date + datetime.timedelta(weeks=2)
