@@ -25,8 +25,8 @@ RECURRING_EMOJI = "🔁"
 # ==========================
 # ✅ CONFIG: feriados
 # ==========================
-HOLIDAY_TYPE_PROP_NAME = "Tipo"
-HOLIDAY_TYPE_VALUE = "Feriado"
+HOLIDAY_TYPE_PROP_NAME = "Tipo"      # multi_select
+HOLIDAY_TYPE_VALUE = "Feriado"       # valor dentro do multi_select
 
 CREATABLE_PROP_TYPES = {
     "title",
@@ -80,8 +80,6 @@ def sanitize_event_title_for_recurrence(title: str) -> str:
         return "(sem título)"
 
     t = title.replace("\u00A0", " ").strip()
-
-    # remove sufixo de ausências
     t = re.sub(r"\s*\((Ausentes|Ausências):.*?\)\s*$", "", t).strip()
 
     warn = r"⚠\uFE0F?"
@@ -115,8 +113,20 @@ def _is_non_empty_content(prop_type, content):
     return True
 
 
+def notion_db_query(database_id: str, payload: dict):
+    """Query com log detalhado quando dá 400."""
+    url = f"https://api.notion.com/v1/databases/{database_id}/query"
+    r = requests.post(url, headers=HEADERS, json=payload)
+    if r.status_code == 400:
+        debug("❌ Notion 400 em /query. Payload enviado:")
+        debug(payload)
+        debug("❌ Body do erro (r.text):")
+        debug(r.text)
+    r.raise_for_status()
+    return r.json()
+
+
 def get_meetings():
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
     all_results = []
     payload = {"page_size": 100}
     next_cursor = None
@@ -124,11 +134,12 @@ def get_meetings():
     while True:
         if next_cursor:
             payload["start_cursor"] = next_cursor
-        r = requests.post(url, headers=HEADERS, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        all_results.extend(data.get("results", []))
-        debug(f"→ carregadas {len(data.get('results', []))} (total {len(all_results)})")
+
+        data = notion_db_query(DATABASE_ID_REUNIOES, payload)
+        batch = data.get("results", [])
+        all_results.extend(batch)
+
+        debug(f"→ carregadas {len(batch)} (total {len(all_results)})")
         next_cursor = data.get("next_cursor")
         if not next_cursor:
             break
@@ -149,60 +160,66 @@ def _daterange_inclusive(start_date: datetime.date, end_date: datetime.date):
 def load_holidays_set(window_start: datetime.date, window_end: datetime.date) -> set:
     """
     Busca no Notion todos os itens com:
-      - Tipo (select) == Feriado
-      - Data no intervalo [window_start, window_end]
+      - Tipo (multi_select) contém "Feriado"
+      - Data dentro do intervalo [window_start, window_end]
     E devolve um set com todas as datas cobertas (expandindo start..end se houver end).
+    Se a consulta falhar, retorna set vazio e a rotina segue.
     """
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
-    all_results = []
-    payload = {
-        "filter": {
-            "and": [
-                {"property": "Data", "date": {"on_or_after": window_start.strftime("%Y-%m-%d")}},
-                {"property": "Data", "date": {"on_or_before": window_end.strftime("%Y-%m-%d")}},
-                {"property": HOLIDAY_TYPE_PROP_NAME, "select": {"equals": HOLIDAY_TYPE_VALUE}},
-            ]
-        },
-        "page_size": 100
-    }
-    next_cursor = None
-
-    while True:
-        if next_cursor:
-            payload["start_cursor"] = next_cursor
-
-        r = requests.post(url, headers=HEADERS, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        batch = data.get("results", [])
-        all_results.extend(batch)
-
-        next_cursor = data.get("next_cursor")
-        if not next_cursor:
-            break
-
     holidays = set()
 
-    for page in all_results:
-        props = page.get("properties", {})
-        date_prop = props.get("Data", {}).get("date") or {}
-        start_raw = date_prop.get("start")
-        end_raw = date_prop.get("end")
+    try:
+        start_s = window_start.strftime("%Y-%m-%d")
+        end_s = window_end.strftime("%Y-%m-%d")
 
-        start_date = normalize_notion_date(start_raw) if start_raw else None
-        end_date = normalize_notion_date(end_raw) if end_raw else None
+        all_results = []
+        payload = {
+            "filter": {
+                "and": [
+                    {"property": "Data", "date": {"on_or_after": start_s}},
+                    {"property": "Data", "date": {"on_or_before": end_s}},
+                    {"property": HOLIDAY_TYPE_PROP_NAME, "multi_select": {"contains": HOLIDAY_TYPE_VALUE}},
+                ]
+            },
+            "page_size": 100
+        }
+        next_cursor = None
 
-        if not start_date:
-            continue
+        while True:
+            if next_cursor:
+                payload["start_cursor"] = next_cursor
 
-        # se tiver end, expande; senão só start
-        if end_date and end_date >= start_date:
-            for d in _daterange_inclusive(start_date, end_date):
-                if window_start <= d <= window_end:
-                    holidays.add(d)
-        else:
-            if window_start <= start_date <= window_end:
-                holidays.add(start_date)
+            data = notion_db_query(DATABASE_ID_REUNIOES, payload)
+            batch = data.get("results", [])
+            all_results.extend(batch)
+
+            next_cursor = data.get("next_cursor")
+            if not next_cursor:
+                break
+
+        debug(f"🎉 Itens de feriado encontrados: {len(all_results)}")
+
+        for page in all_results:
+            props = page.get("properties", {})
+            date_prop = props.get("Data", {}).get("date") or {}
+            start_raw = date_prop.get("start")
+            end_raw = date_prop.get("end")
+
+            start_date = normalize_notion_date(start_raw) if start_raw else None
+            end_date = normalize_notion_date(end_raw) if end_raw else None
+            if not start_date:
+                continue
+
+            if end_date and end_date >= start_date:
+                for d in _daterange_inclusive(start_date, end_date):
+                    if window_start <= d <= window_end:
+                        holidays.add(d)
+            else:
+                if window_start <= start_date <= window_end:
+                    holidays.add(start_date)
+
+    except Exception as e:
+        debug(f"⚠️ Não consegui carregar feriados. Vou seguir sem bloquear datas. Erro: {e}")
+        traceback.print_exc()
 
     return holidays
 
@@ -217,7 +234,7 @@ def is_holiday_date(date_to_check: datetime.date) -> bool:
 def instance_exists_for_date(base_meeting, date_to_check):
     page_id = base_meeting["id"]
     date_str = date_to_check.strftime("%Y-%m-%d")
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
+
     payload = {
         "filter": {
             "and": [
@@ -228,16 +245,16 @@ def instance_exists_for_date(base_meeting, date_to_check):
         },
         "page_size": 1
     }
-    r = requests.post(url, headers=HEADERS, json=payload)
-    r.raise_for_status()
-    results = r.json().get("results", [])
+
+    data = notion_db_query(DATABASE_ID_REUNIOES, payload)
+    results = data.get("results", [])
     debug(f"    instance_exists_for_date {date_str} -> {len(results)} resultados")
     return len(results) > 0
 
 
 def check_existing_instance_by_title_date(base_event, date_to_check):
     date_str = date_to_check.strftime("%Y-%m-%d")
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
+
     payload = {
         "filter": {
             "and": [
@@ -248,9 +265,9 @@ def check_existing_instance_by_title_date(base_event, date_to_check):
         },
         "page_size": 1
     }
-    r = requests.post(url, headers=HEADERS, json=payload)
-    r.raise_for_status()
-    results = r.json().get("results", [])
+
+    data = notion_db_query(DATABASE_ID_REUNIOES, payload)
+    results = data.get("results", [])
     debug(f"    check_existing_instance_by_title_date '{base_event}' {date_str} -> {len(results)}")
     return len(results) > 0
 
@@ -260,7 +277,6 @@ def check_existing_instance_by_title_date(base_event, date_to_check):
 # ==========================
 def create_instance(base_meeting, target_date):
     try:
-        # ✅ NOVO: pula datas com feriado (cache)
         if is_holiday_date(target_date):
             debug(f"🎉 Ignorando criação (feriado): {target_date}")
             return None
@@ -366,7 +382,7 @@ def generate_biweekly(base_meeting, base_date):
 # ==========================
 def count_related_instances_via_query(base_meeting):
     page_id = base_meeting["id"]
-    url = f"https://api.notion.com/v1/databases/{DATABASE_ID_REUNIOES}/query"
+
     all_results = []
     payload = {
         "filter": {
@@ -380,11 +396,11 @@ def count_related_instances_via_query(base_meeting):
     while True:
         if next_cursor:
             payload["start_cursor"] = next_cursor
-        r = requests.post(url, headers=HEADERS, json=payload)
-        r.raise_for_status()
-        data = r.json()
+
+        data = notion_db_query(DATABASE_ID_REUNIOES, payload)
         batch = data.get("results", [])
         all_results.extend(batch)
+
         next_cursor = data.get("next_cursor")
         if not next_cursor:
             break
@@ -394,9 +410,6 @@ def count_related_instances_via_query(base_meeting):
 
 
 def _estimate_end_date_for_meeting(recurrence: str, base_date: datetime.date) -> datetime.date:
-    """
-    Define até onde podemos precisar gerar instâncias, pra montar a janela de feriados.
-    """
     if recurrence == "diária":
         return base_date + datetime.timedelta(days=LIMIT_DAYS)
     if recurrence == "semanal":
@@ -416,11 +429,11 @@ def main():
     today = datetime.date.today()
     debug(f"Hoje: {today}  Reuniões carregadas: {len(meetings)}")
 
-    # 1) Determina janela necessária de feriados (mínimo start, máximo end)
+    # 1) Determina janela necessária de feriados
     window_start = today
     window_end = today
+    recurrent_found = False
 
-    recurrent_meetings = []
     for meeting in meetings:
         props = meeting.get("properties", {})
         recurrence_prop = props.get("Recorrência", {}).get("select")
@@ -438,8 +451,10 @@ def main():
         if not base_date:
             continue
 
-        recurrent_meetings.append(meeting)
+        recurrent_found = True
 
+        # Se você não quiser buscar feriados no passado, troque por:
+        # window_start = today
         if base_date < window_start:
             window_start = base_date
 
@@ -448,14 +463,14 @@ def main():
             window_end = est_end
 
     # 2) Carrega feriados 1x
-    if recurrent_meetings:
+    if recurrent_found:
         debug(f"🎉 Carregando feriados de {window_start} até {window_end}...")
         HOLIDAYS_SET = load_holidays_set(window_start, window_end)
-        debug(f"🎉 Feriados carregados: {len(HOLIDAYS_SET)} datas no cache.")
+        debug(f"🎉 Cache de feriados: {len(HOLIDAYS_SET)} datas.")
     else:
         debug("ℹ️ Nenhuma reunião recorrente encontrada. Não carreguei feriados.")
 
-    # 3) Loop normal de geração
+    # 3) Loop de geração
     for meeting in meetings:
         try:
             props = meeting.get("properties", {})
