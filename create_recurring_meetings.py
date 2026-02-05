@@ -7,7 +7,7 @@ import traceback
 
 # 🔐 Variáveis de ambiente
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES_TESTE")
+DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
 
 # 🧮 Limites
 LIMIT_DAYS = 30
