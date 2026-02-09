@@ -302,7 +302,7 @@ def main():
 
         for m in group_meetings:
             lines.append(
-                f"\n• 🗓️ {m['title']} - {m['url']}\n"
+                f"\n🗓️ {m['title']} - {m['url']}\n"
                 f"  Criada por: {m['creator_name']}\n"
                 f"  {m['start'].strftime('%d/%m/%Y, %H:%M')}–{m['end'].strftime('%H:%M')}\n"
                 f"  Local: {m['local']}\n"
