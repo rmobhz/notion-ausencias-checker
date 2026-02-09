@@ -7,7 +7,7 @@ from dateutil import parser as dateparser
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
-DATABASE_ID_EQUIPE_GCMD = os.getenv("DATABASE_ID_EQUIPE_GCMD")  # <-- novo
+DATABASE_ID_EQUIPE_GCMD = os.getenv("DATABASE_ID_EQUIPE_GCMD")
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 
 NOTION_VERSION = "2022-06-28"
@@ -27,7 +27,7 @@ def normalize_str(s: str) -> str:
         return ""
     s = s.strip().lower()
     s = unicodedata.normalize("NFD", s)
-    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")  # remove acentos
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
     s = re.sub(r"\s+", " ", s)
     return s
 
@@ -54,7 +54,7 @@ def parse_date_range(page: dict, date_prop_name: str = "Data"):
     if date_obj.get("end"):
         end = dateparser.isoparse(date_obj["end"])
     else:
-        end = start + timedelta(hours=1)  # regra: sem fim = 1h
+        end = start + timedelta(hours=1)
 
     return start, end
 
@@ -94,8 +94,8 @@ def fetch_meetings(window_start: datetime, window_end: datetime):
 
 def load_team_email_map():
     """
-    Lê a base Equipe | GCMD e monta um mapa por nome normalizado -> email.
-    Espera propriedades: 'Nome' e 'E-mail' (como você disse).
+    Base Equipe | GCMD: 'Nome' + 'E-mail'
+    Retorna dict: nome_normalizado -> email
     """
     payload = {"page_size": 100}
     pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, payload)
@@ -112,30 +112,59 @@ def load_team_email_map():
 
     return name_to_email
 
-def resolve_email_from_created_by(team_map: dict, created_by_name: str | None) -> str | None:
+def resolve_email_from_name(team_map: dict, name: str | None) -> str | None:
     """
-    Tenta achar o e-mail na base Equipe | GCMD a partir do nome do created_by.
-    Estratégia:
-      1) match exato (normalizado)
-      2) match por "contém" (duas direções)
+    Matching por nome:
+      1) exato normalizado
+      2) contém (duas direções)
     """
-    if not created_by_name:
+    if not name:
         return None
-
-    cb = normalize_str(created_by_name)
+    cb = normalize_str(name)
     if not cb:
         return None
 
-    # 1) exato
     if cb in team_map:
         return team_map[cb]
 
-    # 2) contém (ex.: "rafael marques" vs "rafael marques (gcmd)")
     for team_name_norm, email in team_map.items():
         if cb in team_name_norm or team_name_norm in cb:
             return email
 
     return None
+
+def get_creator_user_id(page: dict) -> str | None:
+    """
+    Preferir a propriedade da base: 'Criado por' (tipo created_by).
+    Se não existir, usar o metadado top-level page['created_by'].
+    """
+    # 1) propriedade "Criado por"
+    prop = page.get("properties", {}).get("Criado por")
+    if prop and prop.get("type") == "created_by":
+        cb = prop.get("created_by") or {}
+        uid = cb.get("id")
+        if uid:
+            return uid
+
+    # 2) fallback: top-level created_by
+    cb2 = page.get("created_by") or {}
+    uid2 = cb2.get("id")
+    if uid2:
+        return uid2
+
+    return None
+
+def fetch_notion_user_name(user_id: str) -> str | None:
+    """
+    Busca detalhes do usuário no endpoint /v1/users/{id}.
+    Aqui normalmente vem 'name' (mesmo quando não veio no database query).
+    """
+    url = f"https://api.notion.com/v1/users/{user_id}"
+    r = requests.get(url, headers=notion_headers(), timeout=30)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    return data.get("name")
 
 # ====== Conflitos ======
 
@@ -152,7 +181,6 @@ def build_conflict_groups(meetings: list[dict]) -> list[list[int]]:
             continue
 
         group = [i]
-
         for j in range(i + 1, n):
             if intervals_overlap(meetings[i]["start"], meetings[i]["end"], meetings[j]["start"], meetings[j]["end"]):
                 group.append(j)
@@ -240,6 +268,9 @@ def main():
 
     pages = fetch_meetings(window_start, window_end)
 
+    # cache de nomes por user_id (pra não chamar /users/{id} toda hora)
+    user_name_cache: dict[str, str] = {}
+
     meetings = []
     for p in pages:
         local = get_prop_text(p, "Local")
@@ -253,10 +284,16 @@ def main():
         title = get_prop_text(p, "Evento").strip() or "(Sem título)"
         url = p.get("url", "")
 
-        created_by = p.get("created_by") or {}
-        created_by_name = created_by.get("name") or ""
+        creator_id = get_creator_user_id(p)
+        creator_name = ""
 
-        email = resolve_email_from_created_by(team_map, created_by_name)
+        if creator_id:
+            if creator_id not in user_name_cache:
+                fetched_name = fetch_notion_user_name(creator_id) or ""
+                user_name_cache[creator_id] = fetched_name
+            creator_name = user_name_cache.get(creator_id, "")
+
+        email = resolve_email_from_name(team_map, creator_name)
 
         meetings.append({
             "title": title,
@@ -264,8 +301,9 @@ def main():
             "local": local,
             "start": start,
             "end": end,
-            "created_by_name": created_by_name,
-            "created_by_email": email,
+            "creator_id": creator_id or "",
+            "creator_name": creator_name or "",
+            "creator_email": email,
         })
 
     meetings.sort(key=lambda m: m["start"])
@@ -277,14 +315,14 @@ def main():
     for group in conflict_groups:
         group_meetings = [meetings[i] for i in group]
 
-        emails = sorted({m["created_by_email"] for m in group_meetings if m["created_by_email"]})
-        missing_people = sorted({m["created_by_name"] for m in group_meetings if not m["created_by_email"]})
+        emails = sorted({m["creator_email"] for m in group_meetings if m["creator_email"]})
+        missing_people = sorted({m["creator_name"] or f"(sem nome) id={m['creator_id']}" for m in group_meetings if not m["creator_email"]})
 
         if not emails:
             print("[WARN] Conflito encontrado, mas não consegui mapear NENHUM e-mail via Equipe | GCMD.")
             print("       Criadores sem match:", ", ".join(missing_people) if missing_people else "(vazio)")
             for m in group_meetings:
-                print(f"       - {m['title']} | {m['start'].isoformat()} | {m['created_by_name']} | {m['url']}")
+                print(f"       - {m['title']} | {m['start'].isoformat()} | name='{m['creator_name']}' id='{m['creator_id']}' | {m['url']}")
             continue
 
         lines = ["⚠️ Conflito de sala (GCMD): há reuniões sobrepostas no mesmo horário/local."]
@@ -302,14 +340,14 @@ def main():
         text = "\n".join(lines)
 
         for email in emails:
-            user_id = slack_lookup_user_id_by_email(email)
-            if not user_id:
+            slack_user_id = slack_lookup_user_id_by_email(email)
+            if not slack_user_id:
                 print(f"[WARN] Slack lookupByEmail falhou para: {email}")
                 continue
 
-            channel_id = slack_open_dm(user_id)
+            channel_id = slack_open_dm(slack_user_id)
             if not channel_id:
-                print(f"[WARN] conversations.open falhou para user_id={user_id} (email={email})")
+                print(f"[WARN] conversations.open falhou para user_id={slack_user_id} (email={email})")
                 continue
 
             ok = slack_post_message(channel_id, text)
