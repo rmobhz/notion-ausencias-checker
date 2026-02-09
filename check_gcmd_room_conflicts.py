@@ -58,7 +58,7 @@ def parse_date_range(page: dict, date_prop_name: str = "Data"):
     if date_obj.get("end"):
         end = dateparser.isoparse(date_obj["end"])
     else:
-        end = start + timedelta(hours=1)  # regra: sem fim = 1h
+        end = start + timedelta(hours=1)
 
     return start, end
 
@@ -100,11 +100,6 @@ def fetch_meetings(window_start: datetime, window_end: datetime):
 # EQUIPE | GCMD
 # =========================
 def load_team_email_map():
-    """
-    Base Equipe | GCMD:
-    - Nome (texto)
-    - E-mail (email)
-    """
     payload = {"page_size": 100}
     pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, payload)
 
@@ -137,7 +132,7 @@ def resolve_email_from_name(team_map: dict, name: str | None) -> str | None:
     return None
 
 # =========================
-# CRIADOR DA REUNIÃO
+# CRIADOR
 # =========================
 def get_creator_user_id(page: dict) -> str | None:
     prop = page.get("properties", {}).get("Criado por")
@@ -246,19 +241,7 @@ def slack_post_message(channel_id: str, text: str) -> bool:
 # MAIN
 # =========================
 def main():
-    missing = [k for k, v in {
-        "NOTION_API_KEY": NOTION_API_KEY,
-        "DATABASE_ID_REUNIOES": DATABASE_ID_REUNIOES,
-        "DATABASE_ID_EQUIPE_GCMD": DATABASE_ID_EQUIPE_GCMD,
-        "SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
-    }.items() if not v]
-
-    if missing:
-        raise RuntimeError(f"Faltam variáveis de ambiente: {', '.join(missing)}")
-
-    print("[INFO] Carregando base Equipe | GCMD...")
     team_map = load_team_email_map()
-    print(f"[INFO] Pessoas mapeadas: {len(team_map)}")
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=1)
@@ -304,49 +287,40 @@ def main():
     meetings.sort(key=lambda m: m["start"])
     conflict_groups = build_conflict_groups(meetings)
 
-    print(f"[INFO] Reuniões GCMD analisadas: {len(meetings)}")
-    print(f"[INFO] Grupos de conflito encontrados: {len(conflict_groups)}")
-
     for group in conflict_groups:
         group_meetings = [meetings[i] for i in group]
         emails = sorted({m["creator_email"] for m in group_meetings if m["creator_email"]})
 
         if not emails:
-            print("[WARN] Conflito encontrado, mas nenhum e-mail foi resolvido.")
             continue
 
         lines = [
-            "⚠️ Opa! Detectei um possível conflito de agenda no GCMD.",
+            "⚠️ Opa! Detectei um possível conflito de agenda na sala de reuniões da GCMD.",
             "",
             "Existem duas ou mais reuniões marcadas para o mesmo local e horário. Dá uma conferida:",
         ]
 
         for m in group_meetings:
             lines.append(
-                f"\n• 🗓️ {m['title']}\n"
-                f"  👤 Criada por: {m['creator_name']}\n"
-                f"  ⏰ {m['start'].strftime('%d/%m/%Y, %H:%M')}–{m['end'].strftime('%H:%M')}\n"
-                f"  📍 Local: {m['local']}\n"
-                f"  🔗 {m['url']}"
+                f"\n• 🗓️ {m['title']} - {m['url']}\n"
+                f"  Criada por: {m['creator_name']}\n"
+                f"  {m['start'].strftime('%d/%m/%Y, %H:%M')}–{m['end'].strftime('%H:%M')}\n"
+                f"  Local: {m['local']}\n"
             )
 
-        lines.append("\n👉 Vale alinhar com o pessoal e ajustar o horário ou o local, se necessário.")
+        lines.append("👉 Vale alinhar com o pessoal e ajustar o horário ou o local, se necessário.")
         text = "\n".join(lines)
 
         for email in emails:
             slack_user_id = slack_lookup_user_id_by_email(email)
             if not slack_user_id:
-                print(f"[WARN] Não encontrei usuário no Slack para {email}")
                 continue
 
             channel_id = slack_open_dm(slack_user_id)
             if not channel_id:
-                print(f"[WARN] Não consegui abrir DM para {email}")
                 continue
 
             slack_post_message(channel_id, text)
-
-    print("[DONE] Script finalizado.")
 
 if __name__ == "__main__":
     main()
