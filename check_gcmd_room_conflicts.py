@@ -5,6 +5,9 @@ import requests
 from datetime import datetime, timedelta, timezone
 from dateutil import parser as dateparser
 
+# =========================
+# ENV VARS
+# =========================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
 DATABASE_ID_EQUIPE_GCMD = os.getenv("DATABASE_ID_EQUIPE_GCMD")
@@ -13,8 +16,9 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 NOTION_VERSION = "2022-06-28"
 GCMD_REGEX = re.compile(r"gcmd", re.IGNORECASE)
 
-# ====== Notion ======
-
+# =========================
+# NOTION HELPERS
+# =========================
 def notion_headers():
     return {
         "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -54,7 +58,7 @@ def parse_date_range(page: dict, date_prop_name: str = "Data"):
     if date_obj.get("end"):
         end = dateparser.isoparse(date_obj["end"])
     else:
-        end = start + timedelta(hours=1)
+        end = start + timedelta(hours=1)  # regra: sem fim = 1h
 
     return start, end
 
@@ -92,10 +96,14 @@ def fetch_meetings(window_start: datetime, window_end: datetime):
     }
     return notion_query_database(DATABASE_ID_REUNIOES, payload)
 
+# =========================
+# EQUIPE | GCMD
+# =========================
 def load_team_email_map():
     """
-    Base Equipe | GCMD: 'Nome' + 'E-mail'
-    Retorna dict: nome_normalizado -> email
+    Base Equipe | GCMD:
+    - Nome (texto)
+    - E-mail (email)
     """
     payload = {"page_size": 100}
     pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, payload)
@@ -113,11 +121,6 @@ def load_team_email_map():
     return name_to_email
 
 def resolve_email_from_name(team_map: dict, name: str | None) -> str | None:
-    """
-    Matching por nome:
-      1) exato normalizado
-      2) contém (duas direções)
-    """
     if not name:
         return None
     cb = normalize_str(name)
@@ -133,41 +136,29 @@ def resolve_email_from_name(team_map: dict, name: str | None) -> str | None:
 
     return None
 
+# =========================
+# CRIADOR DA REUNIÃO
+# =========================
 def get_creator_user_id(page: dict) -> str | None:
-    """
-    Preferir a propriedade da base: 'Criado por' (tipo created_by).
-    Se não existir, usar o metadado top-level page['created_by'].
-    """
-    # 1) propriedade "Criado por"
     prop = page.get("properties", {}).get("Criado por")
     if prop and prop.get("type") == "created_by":
         cb = prop.get("created_by") or {}
-        uid = cb.get("id")
-        if uid:
-            return uid
+        if cb.get("id"):
+            return cb["id"]
 
-    # 2) fallback: top-level created_by
     cb2 = page.get("created_by") or {}
-    uid2 = cb2.get("id")
-    if uid2:
-        return uid2
-
-    return None
+    return cb2.get("id")
 
 def fetch_notion_user_name(user_id: str) -> str | None:
-    """
-    Busca detalhes do usuário no endpoint /v1/users/{id}.
-    Aqui normalmente vem 'name' (mesmo quando não veio no database query).
-    """
     url = f"https://api.notion.com/v1/users/{user_id}"
     r = requests.get(url, headers=notion_headers(), timeout=30)
     if r.status_code != 200:
         return None
-    data = r.json()
-    return data.get("name")
+    return r.json().get("name")
 
-# ====== Conflitos ======
-
+# =========================
+# CONFLITOS
+# =========================
 def intervals_overlap(a_start, a_end, b_start, b_end) -> bool:
     return a_start < b_end and a_end > b_start
 
@@ -182,7 +173,10 @@ def build_conflict_groups(meetings: list[dict]) -> list[list[int]]:
 
         group = [i]
         for j in range(i + 1, n):
-            if intervals_overlap(meetings[i]["start"], meetings[i]["end"], meetings[j]["start"], meetings[j]["end"]):
+            if intervals_overlap(
+                meetings[i]["start"], meetings[i]["end"],
+                meetings[j]["start"], meetings[j]["end"]
+            ):
                 group.append(j)
 
         if len(group) < 2:
@@ -194,7 +188,13 @@ def build_conflict_groups(meetings: list[dict]) -> list[list[int]]:
             for j in range(n):
                 if j in group:
                     continue
-                if any(intervals_overlap(meetings[k]["start"], meetings[k]["end"], meetings[j]["start"], meetings[j]["end"]) for k in group):
+                if any(
+                    intervals_overlap(
+                        meetings[k]["start"], meetings[k]["end"],
+                        meetings[j]["start"], meetings[j]["end"]
+                    )
+                    for k in group
+                ):
                     group.append(j)
                     changed = True
 
@@ -204,8 +204,9 @@ def build_conflict_groups(meetings: list[dict]) -> list[list[int]]:
 
     return groups
 
-# ====== Slack ======
-
+# =========================
+# SLACK
+# =========================
 def slack_headers():
     return {
         "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
@@ -220,9 +221,7 @@ def slack_lookup_user_id_by_email(email: str) -> str | None:
         timeout=30,
     )
     data = r.json()
-    if not data.get("ok"):
-        return None
-    return data["user"]["id"]
+    return data["user"]["id"] if data.get("ok") else None
 
 def slack_open_dm(user_id: str) -> str | None:
     r = requests.post(
@@ -232,9 +231,7 @@ def slack_open_dm(user_id: str) -> str | None:
         timeout=30,
     )
     data = r.json()
-    if not data.get("ok"):
-        return None
-    return data["channel"]["id"]
+    return data["channel"]["id"] if data.get("ok") else None
 
 def slack_post_message(channel_id: str, text: str) -> bool:
     r = requests.post(
@@ -243,11 +240,11 @@ def slack_post_message(channel_id: str, text: str) -> bool:
         json={"channel": channel_id, "text": text},
         timeout=30,
     )
-    data = r.json()
-    return bool(data.get("ok"))
+    return bool(r.json().get("ok"))
 
-# ====== Main ======
-
+# =========================
+# MAIN
+# =========================
 def main():
     missing = [k for k, v in {
         "NOTION_API_KEY": NOTION_API_KEY,
@@ -255,12 +252,13 @@ def main():
         "DATABASE_ID_EQUIPE_GCMD": DATABASE_ID_EQUIPE_GCMD,
         "SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
     }.items() if not v]
+
     if missing:
         raise RuntimeError(f"Faltam variáveis de ambiente: {', '.join(missing)}")
 
-    print("[INFO] Carregando mapa de e-mails da base Equipe | GCMD...")
+    print("[INFO] Carregando base Equipe | GCMD...")
     team_map = load_team_email_map()
-    print(f"[INFO] Pessoas mapeadas na Equipe | GCMD: {len(team_map)}")
+    print(f"[INFO] Pessoas mapeadas: {len(team_map)}")
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=1)
@@ -268,10 +266,9 @@ def main():
 
     pages = fetch_meetings(window_start, window_end)
 
-    # cache de nomes por user_id (pra não chamar /users/{id} toda hora)
-    user_name_cache: dict[str, str] = {}
-
+    user_name_cache = {}
     meetings = []
+
     for p in pages:
         local = get_prop_text(p, "Local")
         if not local or not GCMD_REGEX.search(local):
@@ -289,9 +286,8 @@ def main():
 
         if creator_id:
             if creator_id not in user_name_cache:
-                fetched_name = fetch_notion_user_name(creator_id) or ""
-                user_name_cache[creator_id] = fetched_name
-            creator_name = user_name_cache.get(creator_id, "")
+                user_name_cache[creator_id] = fetch_notion_user_name(creator_id) or ""
+            creator_name = user_name_cache[creator_id]
 
         email = resolve_email_from_name(team_map, creator_name)
 
@@ -301,8 +297,7 @@ def main():
             "local": local,
             "start": start,
             "end": end,
-            "creator_id": creator_id or "",
-            "creator_name": creator_name or "",
+            "creator_name": creator_name or "Pessoa não identificada",
             "creator_email": email,
         })
 
@@ -310,51 +305,48 @@ def main():
     conflict_groups = build_conflict_groups(meetings)
 
     print(f"[INFO] Reuniões GCMD analisadas: {len(meetings)}")
-    print(f"[INFO] Grupos de conflito: {len(conflict_groups)}")
+    print(f"[INFO] Grupos de conflito encontrados: {len(conflict_groups)}")
 
     for group in conflict_groups:
         group_meetings = [meetings[i] for i in group]
-
         emails = sorted({m["creator_email"] for m in group_meetings if m["creator_email"]})
-        missing_people = sorted({m["creator_name"] or f"(sem nome) id={m['creator_id']}" for m in group_meetings if not m["creator_email"]})
 
         if not emails:
-            print("[WARN] Conflito encontrado, mas não consegui mapear NENHUM e-mail via Equipe | GCMD.")
-            print("       Criadores sem match:", ", ".join(missing_people) if missing_people else "(vazio)")
-            for m in group_meetings:
-                print(f"       - {m['title']} | {m['start'].isoformat()} | name='{m['creator_name']}' id='{m['creator_id']}' | {m['url']}")
+            print("[WARN] Conflito encontrado, mas nenhum e-mail foi resolvido.")
             continue
 
-        lines = ["⚠️ Conflito de sala (GCMD): há reuniões sobrepostas no mesmo horário/local."]
+        lines = [
+            "⚠️ Opa! Detectei um possível conflito de agenda no GCMD.",
+            "",
+            "Existem duas ou mais reuniões marcadas para o mesmo local e horário. Dá uma conferida:",
+        ]
+
         for m in group_meetings:
             lines.append(
-                f"• {m['title']} — {m['start'].isoformat()} → {m['end'].isoformat()} — Local: {m['local']} — {m['url']}"
+                f"\n• 🗓️ {m['title']}\n"
+                f"  👤 Criada por: {m['creator_name']}\n"
+                f"  ⏰ {m['start'].strftime('%d/%m/%Y, %H:%M')}–{m['end'].strftime('%H:%M')}\n"
+                f"  📍 Local: {m['local']}\n"
+                f"  🔗 {m['url']}"
             )
 
-        if missing_people:
-            lines.append("")
-            lines.append("⚠️ Obs.: Não consegui identificar o e-mail (Equipe | GCMD) para:")
-            for name in missing_people:
-                lines.append(f"• {name}")
-
+        lines.append("\n👉 Vale alinhar com o pessoal e ajustar o horário ou o local, se necessário.")
         text = "\n".join(lines)
 
         for email in emails:
             slack_user_id = slack_lookup_user_id_by_email(email)
             if not slack_user_id:
-                print(f"[WARN] Slack lookupByEmail falhou para: {email}")
+                print(f"[WARN] Não encontrei usuário no Slack para {email}")
                 continue
 
             channel_id = slack_open_dm(slack_user_id)
             if not channel_id:
-                print(f"[WARN] conversations.open falhou para user_id={slack_user_id} (email={email})")
+                print(f"[WARN] Não consegui abrir DM para {email}")
                 continue
 
-            ok = slack_post_message(channel_id, text)
-            if not ok:
-                print(f"[WARN] chat.postMessage falhou em channel_id={channel_id} (email={email})")
+            slack_post_message(channel_id, text)
 
-    print("[DONE] Execução finalizada.")
+    print("[DONE] Script finalizado.")
 
 if __name__ == "__main__":
     main()
