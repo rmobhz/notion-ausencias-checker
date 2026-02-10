@@ -4,9 +4,6 @@ import requests
 from datetime import datetime, timedelta, timezone
 from dateutil import parser as dateparser
 
-# =========================
-# ENV VARS
-# =========================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
 DATABASE_ID_EQUIPE_GCMD = os.getenv("DATABASE_ID_EQUIPE_GCMD")
@@ -16,7 +13,7 @@ NOTION_VERSION = "2022-06-28"
 GCMD_REGEX = re.compile(r"gcmd", re.IGNORECASE)
 
 # =========================
-# NOTION HELPERS
+# NOTION
 # =========================
 def notion_headers():
     return {
@@ -29,7 +26,6 @@ def get_prop_text(page: dict, prop_name: str) -> str:
     prop = page.get("properties", {}).get(prop_name)
     if not prop:
         return ""
-
     t = prop.get("type")
     if t == "title":
         return "".join(x.get("plain_text", "") for x in prop.get("title", []))
@@ -47,7 +43,6 @@ def parse_date_range(page: dict, prop_name="Data"):
         end = dateparser.isoparse(date_obj["end"])
     else:
         end = start + timedelta(hours=1)
-
     return start, end
 
 def notion_query_database(database_id: str, payload: dict):
@@ -71,15 +66,26 @@ def notion_query_database(database_id: str, payload: dict):
 
     return results
 
+def fetch_notion_user_name(user_id: str) -> str | None:
+    """
+    Resolve nome do usuário via /v1/users/{id},
+    porque em query de database o Notion nem sempre retorna o 'name'.
+    """
+    url = f"https://api.notion.com/v1/users/{user_id}"
+    r = requests.get(url, headers=notion_headers(), timeout=30)
+    if r.status_code != 200:
+        return None
+    return (r.json() or {}).get("name")
+
 # =========================
 # BASE EQUIPE | GCMD
 # =========================
 def load_team_user_map():
     """
-    Mapeia:
-      notion_user_id -> email
-    usando a propriedade:
+    notion_user_id -> email
+    usando:
       'Usuário no Notion' (People)
+      'E-mail' (Email)
     """
     pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, {"page_size": 100})
     user_map = {}
@@ -94,9 +100,12 @@ def load_team_user_map():
             continue
 
         email = email_prop.get("email")
+        if not email:
+            continue
+
         for person in people_prop.get("people", []):
             notion_user_id = person.get("id")
-            if notion_user_id and email:
+            if notion_user_id:
                 user_map[notion_user_id] = email.lower()
 
     return user_map
@@ -117,10 +126,7 @@ def build_conflict_groups(meetings):
 
         group = [i]
         for j in range(i + 1, len(meetings)):
-            if intervals_overlap(
-                m["start"], m["end"],
-                meetings[j]["start"], meetings[j]["end"]
-            ):
+            if intervals_overlap(m["start"], m["end"], meetings[j]["start"], meetings[j]["end"]):
                 group.append(j)
 
         if len(group) < 2:
@@ -132,13 +138,7 @@ def build_conflict_groups(meetings):
             for j in range(len(meetings)):
                 if j in group:
                     continue
-                if any(
-                    intervals_overlap(
-                        meetings[k]["start"], meetings[k]["end"],
-                        meetings[j]["start"], meetings[j]["end"]
-                    )
-                    for k in group
-                ):
+                if any(intervals_overlap(meetings[k]["start"], meetings[k]["end"], meetings[j]["start"], meetings[j]["end"]) for k in group):
                     group.append(j)
                     changed = True
 
@@ -190,6 +190,15 @@ def slack_post_message(channel_id, text):
 # MAIN
 # =========================
 def main():
+    missing = [k for k, v in {
+        "NOTION_API_KEY": NOTION_API_KEY,
+        "DATABASE_ID_REUNIOES": DATABASE_ID_REUNIOES,
+        "DATABASE_ID_EQUIPE_GCMD": DATABASE_ID_EQUIPE_GCMD,
+        "SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
+    }.items() if not v]
+    if missing:
+        raise RuntimeError(f"Faltam variáveis de ambiente: {', '.join(missing)}")
+
     team_user_map = load_team_user_map()
 
     now = datetime.now(timezone.utc)
@@ -207,6 +216,7 @@ def main():
         },
     )
 
+    user_name_cache: dict[str, str] = {}
     meetings = []
 
     for p in pages:
@@ -218,13 +228,23 @@ def main():
         if not start or not end:
             continue
 
-        creator_id = (p.get("created_by") or {}).get("id")
+        creator_id = (p.get("created_by") or {}).get("id") or ""
         email = team_user_map.get(creator_id)
+
+        # nome do criador: resolve via /users/{id} (cache)
+        creator_name = ""
+        if creator_id:
+            if creator_id not in user_name_cache:
+                user_name_cache[creator_id] = fetch_notion_user_name(creator_id) or ""
+            creator_name = user_name_cache.get(creator_id, "")
+
+        if not creator_name:
+            creator_name = "Pessoa não identificada"
 
         meetings.append({
             "title": get_prop_text(p, "Evento") or "(Sem título)",
-            "url": p.get("url"),
-            "creator": (p.get("created_by") or {}).get("name", "Pessoa não identificada"),
+            "url": p.get("url") or "",
+            "creator": creator_name,
             "email": email,
             "start": start,
             "end": end,
@@ -255,7 +275,7 @@ def main():
                 "",
             ])
 
-        lines.append("👉 Se puderem alinhar entre vocês e ajustar o horário ou o local, a agenda agradece 🙌")
+        lines.append("👉 Vale alinhar entre vocês e ajustar o horário ou o local 😊")
         text = "\n".join(lines)
 
         for email in emails:
