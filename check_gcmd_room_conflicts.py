@@ -1,9 +1,14 @@
 import os
 import re
+import json
+import hashlib
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from dateutil import parser as dateparser
 
+# =========================
+# ENV VARS
+# =========================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
 DATABASE_ID_EQUIPE_GCMD = os.getenv("DATABASE_ID_EQUIPE_GCMD")
@@ -11,6 +16,95 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 
 NOTION_VERSION = "2022-06-28"
 GCMD_REGEX = re.compile(r"gcmd", re.IGNORECASE)
+
+STATE_DIR = ".state"
+STATE_FILE = os.path.join(STATE_DIR, "gcmd_conflicts.json")
+
+KEEP_WEEKS = 12  # <-- mantém estado só das últimas 12 semanas
+
+# =========================
+# STATE (anti-flood 1x/semana)
+# =========================
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict) and "sent" in data and isinstance(data["sent"], dict):
+                return data
+    except Exception:
+        pass
+    return {"sent": {}}  # { signature: "YYYY-Www" }
+
+def save_state(state: dict):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def current_week_key(now: datetime) -> str:
+    # ISO week: e.g. "2026-W07"
+    iso_year, iso_week, _ = now.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+
+def week_key_to_monday(week_key: str) -> date | None:
+    """
+    Converte "YYYY-Www" para a segunda-feira daquela ISO-week.
+    """
+    try:
+        year_str, week_str = week_key.split("-W")
+        y = int(year_str)
+        w = int(week_str)
+        return date.fromisocalendar(y, w, 1)  # Monday
+    except Exception:
+        return None
+
+def prune_state(state: dict, now: datetime, keep_weeks: int = KEEP_WEEKS) -> int:
+    """
+    Remove entradas antigas do state["sent"] para evitar crescer sem limite.
+    Mantém somente as últimas `keep_weeks` semanas (por semana ISO).
+    Retorna quantas entradas foram removidas.
+    """
+    sent = state.get("sent", {})
+    if not isinstance(sent, dict) or not sent:
+        return 0
+
+    cutoff_date = (now.date() - timedelta(weeks=keep_weeks))
+
+    to_delete = []
+    for sig, wk in sent.items():
+        monday = week_key_to_monday(str(wk))
+        if monday is None:
+            to_delete.append(sig)
+            continue
+        if monday < cutoff_date:
+            to_delete.append(sig)
+
+    for sig in to_delete:
+        sent.pop(sig, None)
+
+    state["sent"] = sent
+    return len(to_delete)
+
+def conflict_signature(group_meetings: list[dict]) -> str:
+    """
+    Assinatura estável do conflito:
+      - local normalizado
+      - janela do grupo (min start / max end)
+      - ids das páginas (ordenados)
+    """
+    local_norm = (group_meetings[0]["local"] or "").strip().lower()
+    min_start = min(m["start"] for m in group_meetings).isoformat()
+    max_end = max(m["end"] for m in group_meetings).isoformat()
+    ids_sorted = ",".join(sorted(m["page_id"] for m in group_meetings))
+
+    raw = f"{local_norm}|{min_start}|{max_end}|{ids_sorted}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def should_send(signature: str, state: dict, now: datetime) -> bool:
+    last_week = state.get("sent", {}).get(signature)
+    return last_week != current_week_key(now)
+
+def mark_sent(signature: str, state: dict, now: datetime):
+    state.setdefault("sent", {})[signature] = current_week_key(now)
 
 # =========================
 # NOTION
@@ -21,29 +115,6 @@ def notion_headers():
         "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
     }
-
-def get_prop_text(page: dict, prop_name: str) -> str:
-    prop = page.get("properties", {}).get(prop_name)
-    if not prop:
-        return ""
-    t = prop.get("type")
-    if t == "title":
-        return "".join(x.get("plain_text", "") for x in prop.get("title", []))
-    if t == "rich_text":
-        return "".join(x.get("plain_text", "") for x in prop.get("rich_text", []))
-    return ""
-
-def parse_date_range(page: dict, prop_name="Data"):
-    date_obj = page.get("properties", {}).get(prop_name, {}).get("date")
-    if not date_obj or not date_obj.get("start"):
-        return None, None
-
-    start = dateparser.isoparse(date_obj["start"])
-    if date_obj.get("end"):
-        end = dateparser.isoparse(date_obj["end"])
-    else:
-        end = start + timedelta(hours=1)
-    return start, end
 
 def notion_query_database(database_id: str, payload: dict):
     url = f"https://api.notion.com/v1/databases/{database_id}/query"
@@ -66,11 +137,27 @@ def notion_query_database(database_id: str, payload: dict):
 
     return results
 
+def get_prop_text(page: dict, prop_name: str) -> str:
+    prop = page.get("properties", {}).get(prop_name)
+    if not prop:
+        return ""
+    t = prop.get("type")
+    if t == "title":
+        return "".join(x.get("plain_text", "") for x in prop.get("title", []))
+    if t == "rich_text":
+        return "".join(x.get("plain_text", "") for x in prop.get("rich_text", []))
+    return ""
+
+def parse_date_range(page: dict, prop_name="Data"):
+    date_obj = page.get("properties", {}).get(prop_name, {}).get("date")
+    if not date_obj or not date_obj.get("start"):
+        return None, None
+
+    start = dateparser.isoparse(date_obj["start"])
+    end = dateparser.isoparse(date_obj["end"]) if date_obj.get("end") else start + timedelta(hours=1)
+    return start, end
+
 def fetch_notion_user_name(user_id: str) -> str | None:
-    """
-    Resolve nome do usuário via /v1/users/{id},
-    porque em query de database o Notion nem sempre retorna o 'name'.
-    """
     url = f"https://api.notion.com/v1/users/{user_id}"
     r = requests.get(url, headers=notion_headers(), timeout=30)
     if r.status_code != 200:
@@ -78,14 +165,14 @@ def fetch_notion_user_name(user_id: str) -> str | None:
     return (r.json() or {}).get("name")
 
 # =========================
-# BASE EQUIPE | GCMD
+# EQUIPE | GCMD (People -> email)
 # =========================
 def load_team_user_map():
     """
     notion_user_id -> email
-    usando:
-      'Usuário no Notion' (People)
-      'E-mail' (Email)
+    Base Equipe | GCMD:
+      - 'Usuário no Notion' (People)
+      - 'E-mail' (Email)
     """
     pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, {"page_size": 100})
     user_map = {}
@@ -104,9 +191,9 @@ def load_team_user_map():
             continue
 
         for person in people_prop.get("people", []):
-            notion_user_id = person.get("id")
-            if notion_user_id:
-                user_map[notion_user_id] = email.lower()
+            uid = person.get("id")
+            if uid:
+                user_map[uid] = email.lower()
 
     return user_map
 
@@ -132,6 +219,7 @@ def build_conflict_groups(meetings):
         if len(group) < 2:
             continue
 
+        # fecho transitivo
         changed = True
         while changed:
             changed = False
@@ -184,7 +272,7 @@ def slack_post_message(channel_id, text):
         json={"channel": channel_id, "text": text},
         timeout=30,
     )
-    return r.json().get("ok")
+    return bool(r.json().get("ok"))
 
 # =========================
 # MAIN
@@ -199,9 +287,16 @@ def main():
     if missing:
         raise RuntimeError(f"Faltam variáveis de ambiente: {', '.join(missing)}")
 
+    state = load_state()
+    now = datetime.now(timezone.utc)
+
+    # poda o estado antes (limpa lixo antigo)
+    removed = prune_state(state, now, KEEP_WEEKS)
+    if removed:
+        print(f"[INFO] Estado podado: removi {removed} entrada(s) antiga(s).")
+
     team_user_map = load_team_user_map()
 
-    now = datetime.now(timezone.utc)
     pages = notion_query_database(
         DATABASE_ID_REUNIOES,
         {
@@ -224,26 +319,29 @@ def main():
         if not local or not GCMD_REGEX.search(local):
             continue
 
-        start, end = parse_date_range(p)
+        start, end = parse_date_range(p, "Data")
         if not start or not end:
             continue
+
+        page_id = p.get("id") or ""
+        title = (get_prop_text(p, "Evento") or "(Sem título)").strip()
+        url = p.get("url") or ""
 
         creator_id = (p.get("created_by") or {}).get("id") or ""
         email = team_user_map.get(creator_id)
 
-        # nome do criador: resolve via /users/{id} (cache)
         creator_name = ""
         if creator_id:
             if creator_id not in user_name_cache:
                 user_name_cache[creator_id] = fetch_notion_user_name(creator_id) or ""
             creator_name = user_name_cache.get(creator_id, "")
-
         if not creator_name:
             creator_name = "Pessoa não identificada"
 
         meetings.append({
-            "title": get_prop_text(p, "Evento") or "(Sem título)",
-            "url": p.get("url") or "",
+            "page_id": page_id,
+            "title": title,
+            "url": url,
             "creator": creator_name,
             "email": email,
             "start": start,
@@ -251,12 +349,20 @@ def main():
             "local": local,
         })
 
+    meetings.sort(key=lambda m: m["start"])
     conflict_groups = build_conflict_groups(meetings)
+
+    sent_any = False
 
     for group in conflict_groups:
         group_meetings = [meetings[i] for i in group]
-        emails = {m["email"] for m in group_meetings if m["email"]}
+        sig = conflict_signature(group_meetings)
 
+        # anti-flood 1x por semana
+        if not should_send(sig, state, now):
+            continue
+
+        emails = {m["email"] for m in group_meetings if m["email"]}
         if not emails:
             continue
 
@@ -267,8 +373,7 @@ def main():
 
         for m in group_meetings:
             lines.extend([
-                f"🗓️ {m['title']}",
-                m["url"],
+                f"🗓️ {m['title']} - {m['url']}",
                 f"Criada por: {m['creator']}",
                 f"{m['start'].strftime('%d/%m/%Y, %H:%M')}–{m['end'].strftime('%H:%M')}",
                 f"Local: {m['local']}",
@@ -285,6 +390,17 @@ def main():
             channel = slack_open_dm(user_id)
             if channel:
                 slack_post_message(channel, text)
+
+        mark_sent(sig, state, now)
+        sent_any = True
+
+    # poda de novo ao final (caso o mark_sent tenha adicionado muita coisa)
+    removed2 = prune_state(state, now, KEEP_WEEKS)
+    if removed2:
+        print(f"[INFO] Estado podado no final: removi {removed2} entrada(s) antiga(s).")
+
+    save_state(state)
+    print("[DONE] OK" + (" (enviou alertas)" if sent_any else " (nada a enviar)"))
 
 if __name__ == "__main__":
     main()
