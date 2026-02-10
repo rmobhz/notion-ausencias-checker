@@ -367,7 +367,7 @@ def main():
             continue
 
         lines = [
-            "⚠️ Opa! Dei uma olhada na agenda de reuniões e encontrei um possível conflito de horário na sala de reuniões da GCMD.",
+            "Opa! Encontrei um possível conflito de horários na sala de reuniões da GCMD 👀",
             "",
         ]
 
