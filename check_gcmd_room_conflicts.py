@@ -20,10 +20,33 @@ GCMD_REGEX = re.compile(r"gcmd", re.IGNORECASE)
 STATE_DIR = ".state"
 STATE_FILE = os.path.join(STATE_DIR, "gcmd_conflicts.json")
 
-KEEP_WEEKS = 12  # <-- mantém estado só das últimas 12 semanas
+KEEP_WEEKS = 12  # mantém estado só das últimas 12 semanas
+
+# Assumir fuso para datas "naive" vindas do Notion (sem offset)
+# (Brasil/BH/SP normalmente UTC-03)
+DEFAULT_TZ = timezone(timedelta(hours=-3))
 
 # =========================
-# STATE (anti-flood 1x/semana)
+# DATETIME NORMALIZATION
+# =========================
+def ensure_aware(dt: datetime, default_tz: timezone = DEFAULT_TZ) -> datetime:
+    """
+    Garante que dt seja timezone-aware.
+    Se vier sem tzinfo (naive), assume default_tz.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=default_tz)
+    return dt
+
+def to_utc(dt: datetime) -> datetime:
+    """
+    Converte dt para UTC (mantendo aware).
+    """
+    dt = ensure_aware(dt)
+    return dt.astimezone(timezone.utc)
+
+# =========================
+# STATE (anti-flood 1x/semana + limpeza)
 # =========================
 def load_state():
     try:
@@ -41,14 +64,10 @@ def save_state(state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def current_week_key(now: datetime) -> str:
-    # ISO week: e.g. "2026-W07"
     iso_year, iso_week, _ = now.isocalendar()
     return f"{iso_year}-W{iso_week:02d}"
 
 def week_key_to_monday(week_key: str) -> date | None:
-    """
-    Converte "YYYY-Www" para a segunda-feira daquela ISO-week.
-    """
     try:
         year_str, week_str = week_key.split("-W")
         y = int(year_str)
@@ -58,11 +77,6 @@ def week_key_to_monday(week_key: str) -> date | None:
         return None
 
 def prune_state(state: dict, now: datetime, keep_weeks: int = KEEP_WEEKS) -> int:
-    """
-    Remove entradas antigas do state["sent"] para evitar crescer sem limite.
-    Mantém somente as últimas `keep_weeks` semanas (por semana ISO).
-    Retorna quantas entradas foram removidas.
-    """
     sent = state.get("sent", {})
     if not isinstance(sent, dict) or not sent:
         return 0
@@ -72,10 +86,7 @@ def prune_state(state: dict, now: datetime, keep_weeks: int = KEEP_WEEKS) -> int
     to_delete = []
     for sig, wk in sent.items():
         monday = week_key_to_monday(str(wk))
-        if monday is None:
-            to_delete.append(sig)
-            continue
-        if monday < cutoff_date:
+        if monday is None or monday < cutoff_date:
             to_delete.append(sig)
 
     for sig in to_delete:
@@ -85,12 +96,6 @@ def prune_state(state: dict, now: datetime, keep_weeks: int = KEEP_WEEKS) -> int
     return len(to_delete)
 
 def conflict_signature(group_meetings: list[dict]) -> str:
-    """
-    Assinatura estável do conflito:
-      - local normalizado
-      - janela do grupo (min start / max end)
-      - ids das páginas (ordenados)
-    """
     local_norm = (group_meetings[0]["local"] or "").strip().lower()
     min_start = min(m["start"] for m in group_meetings).isoformat()
     max_end = max(m["end"] for m in group_meetings).isoformat()
@@ -154,8 +159,16 @@ def parse_date_range(page: dict, prop_name="Data"):
         return None, None
 
     start = dateparser.isoparse(date_obj["start"])
-    end = dateparser.isoparse(date_obj["end"]) if date_obj.get("end") else start + timedelta(hours=1)
-    return start, end
+    if date_obj.get("end"):
+        end = dateparser.isoparse(date_obj["end"])
+    else:
+        end = start + timedelta(hours=1)
+
+    # Normaliza para UTC, evitando naive/aware misturado
+    start_utc = to_utc(start)
+    end_utc = to_utc(end)
+
+    return start_utc, end_utc
 
 def fetch_notion_user_name(user_id: str) -> str | None:
     url = f"https://api.notion.com/v1/users/{user_id}"
@@ -168,12 +181,6 @@ def fetch_notion_user_name(user_id: str) -> str | None:
 # EQUIPE | GCMD (People -> email)
 # =========================
 def load_team_user_map():
-    """
-    notion_user_id -> email
-    Base Equipe | GCMD:
-      - 'Usuário no Notion' (People)
-      - 'E-mail' (Email)
-    """
     pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, {"page_size": 100})
     user_map = {}
 
@@ -219,14 +226,16 @@ def build_conflict_groups(meetings):
         if len(group) < 2:
             continue
 
-        # fecho transitivo
         changed = True
         while changed:
             changed = False
             for j in range(len(meetings)):
                 if j in group:
                     continue
-                if any(intervals_overlap(meetings[k]["start"], meetings[k]["end"], meetings[j]["start"], meetings[j]["end"]) for k in group):
+                if any(
+                    intervals_overlap(meetings[k]["start"], meetings[k]["end"], meetings[j]["start"], meetings[j]["end"])
+                    for k in group
+                ):
                     group.append(j)
                     changed = True
 
@@ -290,7 +299,6 @@ def main():
     state = load_state()
     now = datetime.now(timezone.utc)
 
-    # poda o estado antes (limpa lixo antigo)
     removed = prune_state(state, now, KEEP_WEEKS)
     if removed:
         print(f"[INFO] Estado podado: removi {removed} entrada(s) antiga(s).")
@@ -372,10 +380,14 @@ def main():
         ]
 
         for m in group_meetings:
+            # NOTE: start/end estão em UTC; para exibir em -03, convertemos:
+            start_local = m["start"].astimezone(DEFAULT_TZ)
+            end_local = m["end"].astimezone(DEFAULT_TZ)
+
             lines.extend([
                 f"🗓️ {m['title']} - {m['url']}",
                 f"Criada por: {m['creator']}",
-                f"{m['start'].strftime('%d/%m/%Y, %H:%M')}–{m['end'].strftime('%H:%M')}",
+                f"{start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
                 f"Local: {m['local']}",
                 "",
             ])
@@ -394,7 +406,6 @@ def main():
         mark_sent(sig, state, now)
         sent_any = True
 
-    # poda de novo ao final (caso o mark_sent tenha adicionado muita coisa)
     removed2 = prune_state(state, now, KEEP_WEEKS)
     if removed2:
         print(f"[INFO] Estado podado no final: removi {removed2} entrada(s) antiga(s).")
