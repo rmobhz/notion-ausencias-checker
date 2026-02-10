@@ -13,6 +13,14 @@ jobs:
       - name: Clonar repositório
         uses: actions/checkout@v3
 
+      - name: Restaurar estado (anti-flood)
+        uses: actions/cache@v4
+        with:
+          path: .state
+          key: gcmd-conflicts-state-${{ github.run_id }}
+          restore-keys: |
+            gcmd-conflicts-state-
+
       - name: Configurar Python
         uses: actions/setup-python@v4
         with:
