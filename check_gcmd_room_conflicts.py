@@ -380,7 +380,7 @@ def main():
                 "",
             ])
 
-        lines.append("👉 Vale alinhar entre vocês e ajustar o horário ou o local 😊")
+        lines.append("👉 Vale alinhar entre vocês e ajustar o horário ou o local")
         text = "\n".join(lines)
 
         for email in emails:
