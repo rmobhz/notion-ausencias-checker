@@ -409,7 +409,7 @@ def main():
             title_link = f"<{safe_url}|{safe_title}>" if safe_url else safe_title
             
             lines.extend([
-                f"🗓️ {title_link}",
+                f"📆 {title_link}",
                 f"Criada por {m['creator']}",
                 f"{start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
                 f"Local: {m['local']}",
