@@ -411,7 +411,7 @@ def main():
             lines.extend([
                 f"🗓️ {title_link}",
                 f"Criada por {m['creator']}",
-                f"Data: {start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
+                f"{start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
                 f"Local: {m['local']}",
                 "",
             ])
