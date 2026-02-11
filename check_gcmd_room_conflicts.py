@@ -403,8 +403,13 @@ def main():
             start_local = m["start"].astimezone(DEFAULT_TZ)
             end_local = m["end"].astimezone(DEFAULT_TZ)
 
+            safe_title = (m["title"] or "(Sem título)").replace("<", "‹").replace(">", "›").strip()
+            safe_url = (m["url"] or "").strip()
+            
+            title_link = f"<{safe_url}|{safe_title}>" if safe_url else safe_title
+            
             lines.extend([
-                f"🗓️ {m['title']} ({m['url']})",
+                f"🗓️ {title_link}",
                 f"Criada por {m['creator']}",
                 f"Data: {start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
                 f"Local: {m['local']}",
