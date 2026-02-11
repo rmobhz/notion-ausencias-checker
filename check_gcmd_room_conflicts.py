@@ -369,7 +369,7 @@ def main():
             "start": start,
             "end": end,
             "local": local,
-            "created_time": created_time,  # <-- NOVO: usado p/ ordenar no Slack
+            "created_time": created_time,
         })
 
     # Continua ordenando p/ detectar conflitos (não muda a lógica de conflito)
@@ -390,7 +390,7 @@ def main():
         if not emails:
             continue
 
-        # ✅ ORDENAR PARA A MENSAGEM NO SLACK POR ORDEM DE CRIAÇÃO (created_time)
+        # ✅ ORDENAR PARA A MENSAGEM NO SLACK POR ORDEM DE CRIAÇÃO
         group_meetings_sorted_for_slack = sorted(group_meetings, key=lambda m: m["created_time"])
 
         lines = [
@@ -399,14 +399,14 @@ def main():
         ]
 
         for m in group_meetings_sorted_for_slack:
-            # NOTE: start/end estão em UTC; para exibir em -03, convertemos:
+            created_local = m["created_time"].astimezone(DEFAULT_TZ)
             start_local = m["start"].astimezone(DEFAULT_TZ)
             end_local = m["end"].astimezone(DEFAULT_TZ)
 
             lines.extend([
                 f"🗓️ {m['title']} - {m['url']}",
-                f"Criada por: {m['creator']}",
-                f"{start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
+                f"Criada por {m['creator']} em {created_local.strftime('%d/%m/%Y %H:%M')}",
+                f"Data: {start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
                 f"Local: {m['local']}",
                 "",
             ])
