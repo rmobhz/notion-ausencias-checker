@@ -404,8 +404,8 @@ def main():
             end_local = m["end"].astimezone(DEFAULT_TZ)
 
             lines.extend([
-                f"🗓️ {m['title']} - {m['url']}",
-                f"Criada por {m['creator']} em {created_local.strftime('%d/%m/%Y %H:%M')}",
+                f"🗓️ {m['title']} ({m['url']})",
+                f"Criada por {m['creator']}",
                 f"Data: {start_local.strftime('%d/%m/%Y, %H:%M')}–{end_local.strftime('%H:%M')}",
                 f"Local: {m['local']}",
                 "",
