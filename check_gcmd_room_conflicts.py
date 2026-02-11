@@ -170,6 +170,18 @@ def parse_date_range(page: dict, prop_name="Data"):
 
     return start_utc, end_utc
 
+def parse_created_time(page: dict) -> datetime | None:
+    """
+    Lê created_time do Notion e normaliza para UTC.
+    """
+    ct = page.get("created_time")
+    if not ct:
+        return None
+    try:
+        return to_utc(dateparser.isoparse(ct))
+    except Exception:
+        return None
+
 def fetch_notion_user_name(user_id: str) -> str | None:
     url = f"https://api.notion.com/v1/users/{user_id}"
     r = requests.get(url, headers=notion_headers(), timeout=30)
@@ -331,6 +343,8 @@ def main():
         if not start or not end:
             continue
 
+        created_time = parse_created_time(p) or datetime.min.replace(tzinfo=timezone.utc)
+
         page_id = p.get("id") or ""
         title = (get_prop_text(p, "Evento") or "(Sem título)").strip()
         url = p.get("url") or ""
@@ -355,8 +369,10 @@ def main():
             "start": start,
             "end": end,
             "local": local,
+            "created_time": created_time,  # <-- NOVO: usado p/ ordenar no Slack
         })
 
+    # Continua ordenando p/ detectar conflitos (não muda a lógica de conflito)
     meetings.sort(key=lambda m: m["start"])
     conflict_groups = build_conflict_groups(meetings)
 
@@ -374,12 +390,15 @@ def main():
         if not emails:
             continue
 
+        # ✅ ORDENAR PARA A MENSAGEM NO SLACK POR ORDEM DE CRIAÇÃO (created_time)
+        group_meetings_sorted_for_slack = sorted(group_meetings, key=lambda m: m["created_time"])
+
         lines = [
             "Opa! Encontrei um possível conflito de horários na sala de reuniões da GCMD 👀",
             "",
         ]
 
-        for m in group_meetings:
+        for m in group_meetings_sorted_for_slack:
             # NOTE: start/end estão em UTC; para exibir em -03, convertemos:
             start_local = m["start"].astimezone(DEFAULT_TZ)
             end_local = m["end"].astimezone(DEFAULT_TZ)
