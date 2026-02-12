@@ -8,12 +8,6 @@ from typing import Dict, Any, List, Optional
 # ✅ CONFIG ÚNICA (edite aqui)
 # ======================================================
 
-# Para adicionar novas bases espelho no futuro, duplique um bloco em MIRRORS.
-# - env_origem / env_espelho: nomes das env vars com os IDs
-# - title_prop_espelho: nome da coluna title no espelho
-# - relation_prop_espelho: nome da relation no espelho que aponta pra origem
-# - copy_props: lista de propriedades a copiar 1:1 (mesmo nome na origem e espelho)
-# - transforms: transformações especiais (ex.: people -> rich_text)
 MIRRORS = [
     {
         "name": "Reuniões",
@@ -24,27 +18,27 @@ MIRRORS = [
         "title_prop_espelho": "Evento",     # title no espelho
         "relation_prop_espelho": "Origem",  # relation no espelho -> origem
 
-        # ✅ props a copiar facilmente (mesmo nome na origem e espelho)
+        # props a copiar 1:1 (mesmo nome na origem e espelho)
         "copy_props": ["Data", "Local", "Status"],
 
-        # ✅ transformações especiais
+        # transformações especiais
         "transforms": {
             # Participantes: origem people -> espelho rich_text (privacidade)
             "Participantes": {
                 "mode": "people_to_text",
-                "target_prop": "Participantes",
+                "target_prop": "Participantes (público)",  # ajuste se seu texto tiver outro nome
                 "separator": ", ",
-                # se quiser expor só setores em vez de nomes, você pode ajustar depois
             }
         },
 
-        # Se na origem o title se chama "Evento", ele já será usado automaticamente.
-        # Se não quiser depender disso, você pode setar uma prop title explícita aqui:
+        # prop title na origem (se existir)
         "title_prop_origem": "Evento",
+
+        # ✅ limpar órfãos (apagados na origem) no espelho
+        "cleanup_orphans": True,
     }
 ]
 
-# Rate limit leve
 SLEEP_BETWEEN_REQUESTS = 0.2
 
 # ======================================================
@@ -140,7 +134,6 @@ def extract_title(page: Dict[str, Any], title_prop_origem: str) -> str:
             if txt:
                 return txt
 
-    # fallback: primeiro title encontrado
     for prop in page.get("properties", {}).values():
         if prop.get("type") == "title":
             parts = prop.get("title", []) or []
@@ -163,21 +156,14 @@ def people_to_text(prop_people: Dict[str, Any], sep: str = ", ") -> str:
     return sep.join(names)
 
 def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_espelho: List[str]) -> Optional[Dict[str, Any]]:
-    """
-    Converte o valor da origem para um payload válido no espelho.
-    Só cobre os tipos que você está usando agora (date, rich_text, status).
-    """
     src_type = prop.get("type")
 
-    # date -> date
     if target_type == "date" and src_type == "date":
         return {"date": prop.get("date")}
 
-    # rich_text -> rich_text
     if target_type == "rich_text" and src_type == "rich_text":
         return {"rich_text": prop.get("rich_text", []) or []}
 
-    # status -> status (por name; se não existir no espelho, não preenche)
     if target_type == "status" and src_type == "status":
         name = (prop.get("status") or {}).get("name")
         if not name:
@@ -186,7 +172,6 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
             return {"status": None}
         return {"status": {"name": name}}
 
-    # people não é copiado aqui (tratado por transforms)
     return None
 
 # ======================================================
@@ -206,21 +191,20 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
     origem_props = list_properties(origem_id)
     espelho_props = list_properties(espelho_id)
 
-    # valida essenciais
     if rel_prop not in espelho_props or espelho_props[rel_prop] != "relation":
         raise RuntimeError(f'[{cfg["name"]}] A relation "{rel_prop}" não existe (ou não é relation) no ESPELHO.')
 
     if title_prop_espelho not in espelho_props or espelho_props[title_prop_espelho] != "title":
         raise RuntimeError(f'[{cfg["name"]}] O title "{title_prop_espelho}" não existe (ou não é title) no ESPELHO.')
 
-    # pré-carrega opções do status (se existir no espelho)
     status_options = []
     if "Status" in espelho_props and espelho_props["Status"] == "status":
         status_options = get_status_options(espelho_id, "Status")
 
-    # busca tudo da origem
     pages = query_all(origem_id, {"page_size": 100}, context=f'Query ORIGEM ({cfg["name"]})')
     print(f'🔍 [{cfg["name"]}] Total na origem: {len(pages)}')
+
+    origin_ids = {p["id"] for p in pages}
 
     created = 0
     updated = 0
@@ -228,14 +212,12 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
     for p in pages:
         pid = p["id"]
 
-        # encontra espelho existente
         existing = query_all(
             espelho_id,
             {"filter": {"property": rel_prop, "relation": {"contains": pid}}, "page_size": 1},
             context=f'Query ESPELHO ({cfg["name"]}) contains origem_id',
         )
 
-        # monta props
         titulo = extract_title(p, title_prop_origem)
 
         props_out: Dict[str, Any] = {
@@ -243,7 +225,6 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
             title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
         }
 
-        # copia props 1:1 (com normalização por tipo)
         for prop_name in cfg.get("copy_props", []):
             if prop_name not in origem_props:
                 continue
@@ -254,23 +235,16 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
             if not src_prop:
                 continue
 
-            normalized = normalize_for_write(
-                src_prop,
-                target_type=espelho_props[prop_name],
-                status_options_espelho=status_options,
-            )
+            normalized = normalize_for_write(src_prop, espelho_props[prop_name], status_options)
             if normalized is not None:
                 props_out[prop_name] = normalized
 
-        # transforms (ex.: people -> text)
         transforms = cfg.get("transforms", {}) or {}
         for origem_prop_name, tcfg in transforms.items():
             mode = tcfg.get("mode")
             target_prop = tcfg.get("target_prop", origem_prop_name)
 
-            if origem_prop_name not in origem_props:
-                continue
-            if target_prop not in espelho_props:
+            if origem_prop_name not in origem_props or target_prop not in espelho_props:
                 continue
 
             src_prop = p["properties"].get(origem_prop_name)
@@ -278,17 +252,16 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
                 continue
 
             if mode == "people_to_text":
-                # origem people -> espelho rich_text
                 if src_prop.get("type") != "people":
                     continue
                 if espelho_props[target_prop] != "rich_text":
-                    raise RuntimeError(f'[{cfg["name"]}] Transform people_to_text exige "{target_prop}" como rich_text no espelho.')
+                    print(f'⚠️ [{cfg["name"]}] "{target_prop}" não é rich_text. Pulando participantes.')
+                    continue
 
                 sep = tcfg.get("separator", ", ")
                 texto = people_to_text(src_prop, sep=sep)
                 props_out[target_prop] = {"rich_text": to_rich_text(texto)}
 
-        # cria/atualiza
         if not existing:
             notion_post(
                 "/pages",
@@ -309,13 +282,43 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
 
     print(f'✅ [{cfg["name"]}] Concluído | Criados: {created} | Atualizados: {updated}')
 
+    # =========================
+    # Limpeza de órfãos: "sumir" do espelho
+    # (Notion API não deleta permanentemente; arquiva.)
+    # =========================
+    if cfg.get("cleanup_orphans"):
+        mirrors_all = query_all(
+            espelho_id,
+            {"page_size": 100},
+            context=f'Query ESPELHO ({cfg["name"]}) para limpeza',
+        )
+
+        orphan_archived = 0
+        for m in mirrors_all:
+            rel = m.get("properties", {}).get(rel_prop)
+            if not rel or rel.get("type") != "relation":
+                continue
+            rel_list = rel.get("relation", []) or []
+            if not rel_list:
+                continue
+            oid = rel_list[0].get("id")
+            if oid and oid not in origin_ids:
+                notion_patch(
+                    f"/pages/{m['id']}",
+                    {"archived": True},
+                    context=f'Arquivar órfão ({cfg["name"]}) espelho_id={m["id"]} origin_id={oid}',
+                )
+                orphan_archived += 1
+                time.sleep(SLEEP_BETWEEN_REQUESTS)
+
+        print(f'🧹 [{cfg["name"]}] Órfãos arquivados no espelho: {orphan_archived}')
+
 # ======================================================
 # MAIN
 # ======================================================
 def main():
     if not NOTION_API_KEY:
         raise RuntimeError("Faltando NOTION_API_KEY.")
-
     for cfg in MIRRORS:
         sync_mirror(cfg)
 
