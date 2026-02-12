@@ -6,35 +6,55 @@ import requests
 from typing import Dict, Any, List, Optional
 
 # ======================================================
-# CONFIG
+# ✅ CONFIG ÚNICA (edite aqui)
 # ======================================================
+
 STATE_DIR = ".state"
 STATE_FILE = os.path.join(STATE_DIR, "mirror_sync_state.json")
 
+# Lotes por execução (seu workflow roda a cada 15 min)
 BATCH_SIZE = int(os.getenv("MIRROR_BATCH_SIZE", "60"))
 CLEANUP_BATCH_SIZE = int(os.getenv("MIRROR_CLEANUP_BATCH_SIZE", "80"))
+
+# Pausa mínima entre requests + retries para 429/5xx
 BASE_SLEEP = float(os.getenv("MIRROR_BASE_SLEEP", "0.15"))
 MAX_RETRIES = int(os.getenv("MIRROR_MAX_RETRIES", "8"))
 
-# ======================================================
-# Mirrors (edite fácil aqui)
-# ======================================================
 MIRRORS = [
     {
         "name": "Reuniões",
         "env_origem": "DATABASE_ID_REUNIOES",
         "env_espelho": "DATABASE_ID_REUNIOES_ESPELHO",
-        "title_prop_espelho": "Evento",
-        "relation_prop_espelho": "Origem",
+
+        # Props no ESPELHO
+        "relation_prop_espelho": "Origem",   # relation no espelho -> origem
+        "title_prop_espelho": "Evento",      # title no espelho
+
+        # Title na ORIGEM (se existir). Se não existir, usa o primeiro title encontrado.
         "title_prop_origem": "Evento",
+
+        # ✅ Props copiadas 1:1 (mesmo nome origem/espelho) — fácil editar
         "copy_props": ["Data", "Local", "Status"],
+
+        # ✅ Transformações especiais
         "transforms": {
+            # Origem: Participantes (people) -> Espelho: Participantes (público) (texto)
             "Participantes": {
-                "mode": "people_to_text",
+                "mode": "people_to_public_text",
                 "target_prop": "Participantes (público)",
+
+                # "count" (recomendado e privativo): "2 participantes"
+                # "names_or_count": tenta nomes; se não der, usa contagem
+                # "names": só nomes (pode ficar vazio dependendo do Notion/permissões)
+                "people_public_mode": "names_or_count",
+
                 "separator": ", ",
+                "label_singular": "participante",
+                "label_plural": "participantes",
             }
         },
+
+        # Limpeza: arquivar no espelho itens cuja origem foi apagada
         "cleanup_orphans": True,
     }
 ]
@@ -81,6 +101,7 @@ def _parse_json_safe(r: requests.Response) -> Dict[str, Any]:
 
 def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
     url = f"{BASE_URL}{path}"
+
     for attempt in range(MAX_RETRIES + 1):
         if method == "GET":
             r = requests.get(url, headers=HEADERS, timeout=60)
@@ -91,6 +112,7 @@ def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]]
         else:
             raise ValueError("Unsupported method")
 
+        # retry on rate limit / server errors
         if r.status_code == 429 or (500 <= r.status_code <= 599):
             wait = min(60, (2 ** attempt)) + random.uniform(0, 0.6)
             ra = r.headers.get("Retry-After")
@@ -99,7 +121,7 @@ def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]]
                     wait = max(wait, float(ra))
                 except Exception:
                     pass
-            print(f"⚠️ Rate/Server limit ({r.status_code}) em {context}. Tentativa {attempt+1}/{MAX_RETRIES+1}. Aguardando {wait:.1f}s.")
+            print(f"⚠️ {r.status_code} em {context}. Tentativa {attempt+1}/{MAX_RETRIES+1}. Aguardando {wait:.1f}s.")
             time.sleep(wait)
             continue
 
@@ -154,8 +176,11 @@ def list_properties(database_id: str) -> Dict[str, str]:
     props = db.get("properties", {})
     return {name: props[name].get("type") for name in props.keys()}
 
+def get_database_schema(database_id: str) -> Dict[str, Any]:
+    return notion_get(f"/databases/{database_id}", context="Get database schema")
+
 def get_status_options(database_id: str, status_prop_name: str) -> List[str]:
-    db = notion_get(f"/databases/{database_id}", context="Get status options")
+    db = get_database_schema(database_id)
     prop = db.get("properties", {}).get(status_prop_name)
     if not prop or prop.get("type") != "status":
         return []
@@ -170,10 +195,12 @@ def extract_title(page: Dict[str, Any], title_prop_origem: str) -> str:
             txt = "".join(p.get("plain_text", "") for p in parts).strip()
             if txt:
                 return txt
+
     for prop in page.get("properties", {}).values():
         if prop.get("type") == "title":
             parts = prop.get("title", []) or []
             return "".join(p.get("plain_text", "") for p in parts).strip()
+
     return "(Sem título)"
 
 def to_rich_text(text: str) -> List[Dict[str, Any]]:
@@ -195,9 +222,11 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
         if not name:
             return {"status": None}
         if status_options_espelho and name not in status_options_espelho:
+            # não trava a sync
             return {"status": None}
         return {"status": {"name": name}}
 
+    # (se quiser adicionar select/multi_select depois, é aqui)
     return None
 
 def find_existing_mirror(espelho_db: str, rel_prop: str, origem_page_id: str, cfg_name: str) -> Optional[str]:
@@ -211,33 +240,80 @@ def find_existing_mirror(espelho_db: str, rel_prop: str, origem_page_id: str, cf
     return None
 
 # ======================================================
-# ✅ People name cache
+# ✅ Robust People fetch (fallback)
 # ======================================================
-def get_user_name_cached(user_id: str, state: Dict[str, Any]) -> str:
-    cache = state.setdefault("user_cache", {})
-    if user_id in cache:
-        return cache[user_id] or ""
+def get_property_id_from_schema(schema: Dict[str, Any], prop_name: str) -> Optional[str]:
+    prop = (schema.get("properties") or {}).get(prop_name)
+    if not prop:
+        return None
+    return prop.get("id")
 
-    data = notion_get(f"/users/{user_id}", context=f"Get user {user_id}")
-    name = data.get("name") or ""
-    cache[user_id] = name
-    return name
+def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any]]:
+    """
+    Busca o valor completo de uma propriedade People via:
+    GET /pages/{page_id}/properties/{property_id}
+    (paginado)
+    Retorna lista de dicts com pelo menos id/name quando existirem.
+    """
+    people: List[Dict[str, Any]] = []
+    cursor = None
 
-def people_to_text(prop_people: Dict[str, Any], sep: str, state: Dict[str, Any]) -> str:
-    arr = prop_people.get("people", []) or []
-    names: List[str] = []
-    for p in arr:
-        uid = p.get("id")
-        # às vezes vem name, às vezes não
-        name = p.get("name") or ""
-        if not name and uid:
-            name = get_user_name_cached(uid, state)
-        if name:
-            names.append(name)
-    return sep.join(names)
+    while True:
+        path = f"/pages/{page_id}/properties/{prop_id}"
+        if cursor:
+            path += f"?start_cursor={cursor}"
+
+        data = notion_get(path, context=f"Get page property item (people) page={page_id}")
+        results = data.get("results", []) or []
+
+        # Estruturas podem variar; extraímos id/name quando existirem
+        for it in results:
+            uid = it.get("id")
+            name = it.get("name")
+            if uid or name:
+                people.append({"id": uid, "name": name})
+
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    return people
+
+def make_participants_public_text(
+    people_items: List[Dict[str, Any]],
+    mode: str,
+    sep: str,
+    singular: str,
+    plural: str
+) -> str:
+    """
+    mode:
+      - count: "2 participantes"
+      - names_or_count: tenta nomes; se não der, usa contagem
+      - names: só nomes
+    """
+    count = len([p for p in people_items if p.get("id") or p.get("name")])
+
+    if mode == "count":
+        if count == 0:
+            return ""
+        return f"{count} {singular if count == 1 else plural}"
+
+    names = [p.get("name") for p in people_items if p.get("name")]
+    names = [n for n in names if n]
+
+    if mode == "names":
+        return sep.join(names)
+
+    # names_or_count
+    if names:
+        return sep.join(names)
+    if count == 0:
+        return ""
+    return f"{count} {singular if count == 1 else plural}"
 
 # ======================================================
-# Sync with batching
+# Sync with batching + cleanup
 # ======================================================
 def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
     origem_db = os.getenv(cfg["env_origem"])
@@ -248,7 +324,7 @@ def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
     key = mirror_key(cfg, origem_db, espelho_db)
     s = state.get(key, {})
     cursor = s.get("cursor")
-    phase = s.get("phase", "sync")
+    phase = s.get("phase", "sync")  # "sync" ou "cleanup"
     cleanup_cursor = s.get("cleanup_cursor")
 
     rel_prop = cfg["relation_prop_espelho"]
@@ -263,11 +339,22 @@ def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
     if title_prop_espelho not in espelho_props or espelho_props[title_prop_espelho] != "title":
         raise RuntimeError(f'[{cfg["name"]}] Title "{title_prop_espelho}" não existe (ou não é title) no espelho.')
 
+    # schema da origem para conseguir property_id do People (fallback)
+    origem_schema = get_database_schema(origem_db)
+    participants_prop_id = None
+    # Descobre a prop source do transform (a chave do dict)
+    if cfg.get("transforms"):
+        # se tiver "Participantes" no transforms, pega o id no schema
+        if "Participantes" in cfg["transforms"]:
+            participants_prop_id = get_property_id_from_schema(origem_schema, "Participantes")
+
     status_options = []
     if "Status" in espelho_props and espelho_props["Status"] == "status":
         status_options = get_status_options(espelho_db, "Status")
 
-    # -------- SYNC --------
+    # -------------------------
+    # PHASE 1: SYNC
+    # -------------------------
     if phase == "sync":
         processed = 0
         created = 0
@@ -299,36 +386,67 @@ def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
                     title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
                 }
 
+                # Copiar props 1:1
                 for prop_name in cfg.get("copy_props", []):
                     if prop_name not in origem_props or prop_name not in espelho_props:
                         continue
                     src_prop = p["properties"].get(prop_name)
                     if not src_prop:
                         continue
+
                     normalized = normalize_for_write(src_prop, espelho_props[prop_name], status_options)
                     if normalized is not None:
                         props_out[prop_name] = normalized
 
-                # transforms
+                # Transforms
                 transforms = cfg.get("transforms", {}) or {}
                 for origem_prop_name, tcfg in transforms.items():
                     mode = tcfg.get("mode")
                     target_prop = tcfg.get("target_prop", origem_prop_name)
+
                     if origem_prop_name not in origem_props or target_prop not in espelho_props:
                         continue
+
                     src_prop = p["properties"].get(origem_prop_name)
                     if not src_prop:
                         continue
 
-                    if mode == "people_to_text":
+                    if mode == "people_to_public_text":
                         if src_prop.get("type") != "people":
                             continue
                         if espelho_props[target_prop] != "rich_text":
                             continue
+
+                        # tenta people do query
+                        people_items: List[Dict[str, Any]] = []
+                        people_arr = src_prop.get("people", []) or []
+                        for u in people_arr:
+                            people_items.append({"id": u.get("id"), "name": u.get("name")})
+
+                        # fallback: se veio vazio/incompleto, busca via property item
+                        if (not people_items or all((not x.get("id") and not x.get("name")) for x in people_items)) and participants_prop_id:
+                            try:
+                                people_items = fetch_people_property_item(origem_page_id, participants_prop_id)
+                            except Exception:
+                                # não trava o sync
+                                people_items = []
+
+                        people_mode = tcfg.get("people_public_mode", "count")
                         sep = tcfg.get("separator", ", ")
-                        texto = people_to_text(src_prop, sep=sep, state=state)
+                        singular = tcfg.get("label_singular", "participante")
+                        plural = tcfg.get("label_plural", "participantes")
+
+                        texto = make_participants_public_text(
+                            people_items=people_items,
+                            mode=people_mode,
+                            sep=sep,
+                            singular=singular,
+                            plural=plural,
+                        )
+
                         props_out[target_prop] = {"rich_text": to_rich_text(texto)}
 
+                # Criar / Atualizar
                 if mirror_id is None:
                     notion_post(
                         "/pages",
@@ -359,8 +477,11 @@ def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
         save_state(state)
         return
 
-    # -------- CLEANUP --------
+    # -------------------------
+    # PHASE 2: CLEANUP (órfãos)
+    # -------------------------
     if phase == "cleanup":
+        # Carrega IDs da origem (para saber o que ainda existe)
         all_origin = query_all(origem_db, {"page_size": 100}, context=f"Load all origin ids ({cfg['name']})")
         origin_ids = {p["id"] for p in all_origin}
 
@@ -408,6 +529,7 @@ def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
 
         s["cleanup_cursor"] = cursor
         if cursor is None:
+            # terminou limpeza: volta pro sync do início pra pegar novas mudanças
             s["phase"] = "sync"
             s["cursor"] = None
             s["cleanup_cursor"] = None
@@ -416,9 +538,6 @@ def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
         save_state(state)
         return
 
-# ======================================================
-# MAIN
-# ======================================================
 def main():
     if not NOTION_API_KEY:
         raise RuntimeError("Faltando NOTION_API_KEY.")
