@@ -39,8 +39,8 @@ jobs:
           # python notion_check_calendario.py
           # echo "▶️ Criando reuniões recorrentes..."
           # python create_recurring_meetings.py
-          echo "▶️ Sincronizando base espelho de reuniões..."
-          python sync_reunioes_espelho.py
+          echo "▶️ Sincronizando bases espelho a serem publicadas..."
+          python sync_espelho.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
