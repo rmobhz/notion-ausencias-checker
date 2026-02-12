@@ -1,45 +1,43 @@
 import os
 import time
 import json
+import random
 import requests
 from typing import Dict, Any, List, Optional
 
 # ======================================================
-# ✅ CONFIG ÚNICA (edite aqui)
+# CONFIG
 # ======================================================
+STATE_DIR = ".state"
+STATE_FILE = os.path.join(STATE_DIR, "mirror_sync_state.json")
 
+BATCH_SIZE = int(os.getenv("MIRROR_BATCH_SIZE", "60"))
+CLEANUP_BATCH_SIZE = int(os.getenv("MIRROR_CLEANUP_BATCH_SIZE", "80"))
+BASE_SLEEP = float(os.getenv("MIRROR_BASE_SLEEP", "0.15"))
+MAX_RETRIES = int(os.getenv("MIRROR_MAX_RETRIES", "8"))
+
+# ======================================================
+# Mirrors (edite fácil aqui)
+# ======================================================
 MIRRORS = [
     {
         "name": "Reuniões",
         "env_origem": "DATABASE_ID_REUNIOES",
         "env_espelho": "DATABASE_ID_REUNIOES_ESPELHO",
-
-        # propriedades no ESPELHO
-        "title_prop_espelho": "Evento",     # title no espelho
-        "relation_prop_espelho": "Origem",  # relation no espelho -> origem
-
-        # props a copiar 1:1 (mesmo nome na origem e espelho)
+        "title_prop_espelho": "Evento",
+        "relation_prop_espelho": "Origem",
+        "title_prop_origem": "Evento",
         "copy_props": ["Data", "Local", "Status"],
-
-        # transformações especiais
         "transforms": {
-            # Participantes: origem people -> espelho rich_text (privacidade)
             "Participantes": {
                 "mode": "people_to_text",
-                "target_prop": "Participantes (público)",  # ajuste se seu texto tiver outro nome
+                "target_prop": "Participantes (público)",
                 "separator": ", ",
             }
         },
-
-        # prop title na origem (se existir)
-        "title_prop_origem": "Evento",
-
-        # ✅ limpar órfãos (apagados na origem) no espelho
         "cleanup_orphans": True,
     }
 ]
-
-SLEEP_BETWEEN_REQUESTS = 0.2
 
 # ======================================================
 # NOTION API
@@ -55,46 +53,88 @@ HEADERS = {
 }
 
 # ======================================================
-# HTTP helpers
+# STATE
 # ======================================================
-def _raise_with_details(r: requests.Response, context: str, payload: Optional[Dict[str, Any]] = None) -> None:
-    try:
-        details = r.json()
-    except Exception:
-        details = {"raw_text": r.text}
+def load_state() -> Dict[str, Any]:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if not os.path.exists(STATE_FILE):
+        return {}
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    print("\n❌ ERRO Notion API")
-    print(f"Contexto: {context}")
-    print(f"Status: {r.status_code}")
-    if payload is not None:
-        print("Payload:")
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    print("Detalhes:")
-    print(json.dumps(details, ensure_ascii=False, indent=2))
-    print()
-    r.raise_for_status()
+def save_state(state: Dict[str, Any]) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def mirror_key(cfg: Dict[str, Any], origem_db: str, espelho_db: str) -> str:
+    return f'{cfg["name"]}::{origem_db}::{espelho_db}'
+
+# ======================================================
+# HTTP (retry/backoff)
+# ======================================================
+def _parse_json_safe(r: requests.Response) -> Dict[str, Any]:
+    try:
+        return r.json()
+    except Exception:
+        return {"raw_text": r.text}
+
+def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
+    url = f"{BASE_URL}{path}"
+    for attempt in range(MAX_RETRIES + 1):
+        if method == "GET":
+            r = requests.get(url, headers=HEADERS, timeout=60)
+        elif method == "POST":
+            r = requests.post(url, headers=HEADERS, json=payload, timeout=60)
+        elif method == "PATCH":
+            r = requests.patch(url, headers=HEADERS, json=payload, timeout=60)
+        else:
+            raise ValueError("Unsupported method")
+
+        if r.status_code == 429 or (500 <= r.status_code <= 599):
+            wait = min(60, (2 ** attempt)) + random.uniform(0, 0.6)
+            ra = r.headers.get("Retry-After")
+            if ra:
+                try:
+                    wait = max(wait, float(ra))
+                except Exception:
+                    pass
+            print(f"⚠️ Rate/Server limit ({r.status_code}) em {context}. Tentativa {attempt+1}/{MAX_RETRIES+1}. Aguardando {wait:.1f}s.")
+            time.sleep(wait)
+            continue
+
+        if not r.ok:
+            details = _parse_json_safe(r)
+            print("\n❌ ERRO Notion API")
+            print(f"Contexto: {context}")
+            print(f"Status: {r.status_code}")
+            if payload is not None:
+                print("Payload:")
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print("Detalhes:")
+            print(json.dumps(details, ensure_ascii=False, indent=2))
+            r.raise_for_status()
+
+        time.sleep(BASE_SLEEP)
+        return r.json()
+
+    raise RuntimeError(f"Falhou após retries: {context}")
 
 def notion_get(path: str, context: str) -> Dict[str, Any]:
-    r = requests.get(f"{BASE_URL}{path}", headers=HEADERS, timeout=60)
-    if not r.ok:
-        _raise_with_details(r, f"GET {path} | {context}")
-    return r.json()
+    return request_with_retry("GET", path, None, context)
 
 def notion_post(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    r = requests.post(f"{BASE_URL}{path}", headers=HEADERS, json=payload, timeout=60)
-    if not r.ok:
-        _raise_with_details(r, f"POST {path} | {context}", payload)
-    return r.json()
+    return request_with_retry("POST", path, payload, context)
 
 def notion_patch(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    r = requests.patch(f"{BASE_URL}{path}", headers=HEADERS, json=payload, timeout=60)
-    if not r.ok:
-        _raise_with_details(r, f"PATCH {path} | {context}", payload)
-    return r.json()
+    return request_with_retry("PATCH", path, payload, context)
 
 # ======================================================
 # Notion helpers
 # ======================================================
+def query_database_page(database_id: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
+    return notion_post(f"/databases/{database_id}/query", payload, context=context)
+
 def query_all(database_id: str, payload: Dict[str, Any], context: str) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     cursor = None
@@ -102,14 +142,11 @@ def query_all(database_id: str, payload: Dict[str, Any], context: str) -> List[D
         body = dict(payload)
         if cursor:
             body["start_cursor"] = cursor
-
-        data = notion_post(f"/databases/{database_id}/query", body, context=context)
+        data = query_database_page(database_id, body, context=context)
         results.extend(data.get("results", []))
-
         if not data.get("has_more"):
             break
         cursor = data.get("next_cursor")
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
     return results
 
 def list_properties(database_id: str) -> Dict[str, str]:
@@ -133,27 +170,16 @@ def extract_title(page: Dict[str, Any], title_prop_origem: str) -> str:
             txt = "".join(p.get("plain_text", "") for p in parts).strip()
             if txt:
                 return txt
-
     for prop in page.get("properties", {}).values():
         if prop.get("type") == "title":
             parts = prop.get("title", []) or []
             return "".join(p.get("plain_text", "") for p in parts).strip()
-
     return "(Sem título)"
 
 def to_rich_text(text: str) -> List[Dict[str, Any]]:
     if not text:
         return []
     return [{"type": "text", "text": {"content": text}}]
-
-def people_to_text(prop_people: Dict[str, Any], sep: str = ", ") -> str:
-    arr = prop_people.get("people", []) or []
-    names = []
-    for p in arr:
-        name = p.get("name")
-        if name:
-            names.append(name)
-    return sep.join(names)
 
 def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_espelho: List[str]) -> Optional[Dict[str, Any]]:
     src_type = prop.get("type")
@@ -174,144 +200,221 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
 
     return None
 
-# ======================================================
-# Sync (1 mirror)
-# ======================================================
-def sync_mirror(cfg: Dict[str, Any]) -> None:
-    origem_id = os.getenv(cfg["env_origem"])
-    espelho_id = os.getenv(cfg["env_espelho"])
+def find_existing_mirror(espelho_db: str, rel_prop: str, origem_page_id: str, cfg_name: str) -> Optional[str]:
+    res = query_all(
+        espelho_db,
+        {"filter": {"property": rel_prop, "relation": {"contains": origem_page_id}}, "page_size": 1},
+        context=f"Find existing mirror ({cfg_name})",
+    )
+    if res:
+        return res[0]["id"]
+    return None
 
-    if not origem_id or not espelho_id:
+# ======================================================
+# ✅ People name cache
+# ======================================================
+def get_user_name_cached(user_id: str, state: Dict[str, Any]) -> str:
+    cache = state.setdefault("user_cache", {})
+    if user_id in cache:
+        return cache[user_id] or ""
+
+    data = notion_get(f"/users/{user_id}", context=f"Get user {user_id}")
+    name = data.get("name") or ""
+    cache[user_id] = name
+    return name
+
+def people_to_text(prop_people: Dict[str, Any], sep: str, state: Dict[str, Any]) -> str:
+    arr = prop_people.get("people", []) or []
+    names: List[str] = []
+    for p in arr:
+        uid = p.get("id")
+        # às vezes vem name, às vezes não
+        name = p.get("name") or ""
+        if not name and uid:
+            name = get_user_name_cached(uid, state)
+        if name:
+            names.append(name)
+    return sep.join(names)
+
+# ======================================================
+# Sync with batching
+# ======================================================
+def sync_mirror(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
+    origem_db = os.getenv(cfg["env_origem"])
+    espelho_db = os.getenv(cfg["env_espelho"])
+    if not origem_db or not espelho_db:
         raise RuntimeError(f'Faltando env vars para "{cfg["name"]}": {cfg["env_origem"]} e/ou {cfg["env_espelho"]}')
+
+    key = mirror_key(cfg, origem_db, espelho_db)
+    s = state.get(key, {})
+    cursor = s.get("cursor")
+    phase = s.get("phase", "sync")
+    cleanup_cursor = s.get("cleanup_cursor")
 
     rel_prop = cfg["relation_prop_espelho"]
     title_prop_espelho = cfg["title_prop_espelho"]
     title_prop_origem = cfg.get("title_prop_origem", "")
 
-    origem_props = list_properties(origem_id)
-    espelho_props = list_properties(espelho_id)
+    origem_props = list_properties(origem_db)
+    espelho_props = list_properties(espelho_db)
 
     if rel_prop not in espelho_props or espelho_props[rel_prop] != "relation":
-        raise RuntimeError(f'[{cfg["name"]}] A relation "{rel_prop}" não existe (ou não é relation) no ESPELHO.')
-
+        raise RuntimeError(f'[{cfg["name"]}] Relation "{rel_prop}" não existe (ou não é relation) no espelho.')
     if title_prop_espelho not in espelho_props or espelho_props[title_prop_espelho] != "title":
-        raise RuntimeError(f'[{cfg["name"]}] O title "{title_prop_espelho}" não existe (ou não é title) no ESPELHO.')
+        raise RuntimeError(f'[{cfg["name"]}] Title "{title_prop_espelho}" não existe (ou não é title) no espelho.')
 
     status_options = []
     if "Status" in espelho_props and espelho_props["Status"] == "status":
-        status_options = get_status_options(espelho_id, "Status")
+        status_options = get_status_options(espelho_db, "Status")
 
-    pages = query_all(origem_id, {"page_size": 100}, context=f'Query ORIGEM ({cfg["name"]})')
-    print(f'🔍 [{cfg["name"]}] Total na origem: {len(pages)}')
+    # -------- SYNC --------
+    if phase == "sync":
+        processed = 0
+        created = 0
+        updated = 0
 
-    origin_ids = {p["id"] for p in pages}
+        while processed < BATCH_SIZE:
+            payload = {"page_size": 100}
+            if cursor:
+                payload["start_cursor"] = cursor
 
-    created = 0
-    updated = 0
+            page = query_database_page(origem_db, payload, context=f"Query origem page ({cfg['name']})")
+            items = page.get("results", [])
+            cursor = page.get("next_cursor") if page.get("has_more") else None
 
-    for p in pages:
-        pid = p["id"]
+            if not items:
+                break
 
-        existing = query_all(
-            espelho_id,
-            {"filter": {"property": rel_prop, "relation": {"contains": pid}}, "page_size": 1},
-            context=f'Query ESPELHO ({cfg["name"]}) contains origem_id',
-        )
+            for p in items:
+                if processed >= BATCH_SIZE:
+                    break
 
-        titulo = extract_title(p, title_prop_origem)
+                origem_page_id = p["id"]
+                mirror_id = find_existing_mirror(espelho_db, rel_prop, origem_page_id, cfg["name"])
 
-        props_out: Dict[str, Any] = {
-            rel_prop: {"relation": [{"id": pid}]},
-            title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
-        }
+                titulo = extract_title(p, title_prop_origem)
 
-        for prop_name in cfg.get("copy_props", []):
-            if prop_name not in origem_props:
-                continue
-            if prop_name not in espelho_props:
-                continue
+                props_out: Dict[str, Any] = {
+                    rel_prop: {"relation": [{"id": origem_page_id}]},
+                    title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
+                }
 
-            src_prop = p["properties"].get(prop_name)
-            if not src_prop:
-                continue
+                for prop_name in cfg.get("copy_props", []):
+                    if prop_name not in origem_props or prop_name not in espelho_props:
+                        continue
+                    src_prop = p["properties"].get(prop_name)
+                    if not src_prop:
+                        continue
+                    normalized = normalize_for_write(src_prop, espelho_props[prop_name], status_options)
+                    if normalized is not None:
+                        props_out[prop_name] = normalized
 
-            normalized = normalize_for_write(src_prop, espelho_props[prop_name], status_options)
-            if normalized is not None:
-                props_out[prop_name] = normalized
+                # transforms
+                transforms = cfg.get("transforms", {}) or {}
+                for origem_prop_name, tcfg in transforms.items():
+                    mode = tcfg.get("mode")
+                    target_prop = tcfg.get("target_prop", origem_prop_name)
+                    if origem_prop_name not in origem_props or target_prop not in espelho_props:
+                        continue
+                    src_prop = p["properties"].get(origem_prop_name)
+                    if not src_prop:
+                        continue
 
-        transforms = cfg.get("transforms", {}) or {}
-        for origem_prop_name, tcfg in transforms.items():
-            mode = tcfg.get("mode")
-            target_prop = tcfg.get("target_prop", origem_prop_name)
+                    if mode == "people_to_text":
+                        if src_prop.get("type") != "people":
+                            continue
+                        if espelho_props[target_prop] != "rich_text":
+                            continue
+                        sep = tcfg.get("separator", ", ")
+                        texto = people_to_text(src_prop, sep=sep, state=state)
+                        props_out[target_prop] = {"rich_text": to_rich_text(texto)}
 
-            if origem_prop_name not in origem_props or target_prop not in espelho_props:
-                continue
+                if mirror_id is None:
+                    notion_post(
+                        "/pages",
+                        {"parent": {"database_id": espelho_db}, "properties": props_out},
+                        context=f"Criar espelho ({cfg['name']}) origem_id={origem_page_id}",
+                    )
+                    created += 1
+                else:
+                    notion_patch(
+                        f"/pages/{mirror_id}",
+                        {"properties": props_out},
+                        context=f"Atualizar espelho ({cfg['name']}) espelho_id={mirror_id} origem_id={origem_page_id}",
+                    )
+                    updated += 1
 
-            src_prop = p["properties"].get(origem_prop_name)
-            if not src_prop:
-                continue
+                processed += 1
 
-            if mode == "people_to_text":
-                if src_prop.get("type") != "people":
+            if cursor is None:
+                break
+
+        print(f"✅ [{cfg['name']}] Sync batch | Processados: {processed} | Criados: {created} | Atualizados: {updated} | Próximo cursor: {cursor}")
+
+        s["cursor"] = cursor
+        if cursor is None and cfg.get("cleanup_orphans"):
+            s["phase"] = "cleanup"
+            s["cleanup_cursor"] = None
+        state[key] = s
+        save_state(state)
+        return
+
+    # -------- CLEANUP --------
+    if phase == "cleanup":
+        all_origin = query_all(origem_db, {"page_size": 100}, context=f"Load all origin ids ({cfg['name']})")
+        origin_ids = {p["id"] for p in all_origin}
+
+        processed = 0
+        archived = 0
+        cursor = cleanup_cursor
+
+        while processed < CLEANUP_BATCH_SIZE:
+            payload = {"page_size": 100}
+            if cursor:
+                payload["start_cursor"] = cursor
+
+            page = query_database_page(espelho_db, payload, context=f"Query espelho page (cleanup {cfg['name']})")
+            items = page.get("results", [])
+            cursor = page.get("next_cursor") if page.get("has_more") else None
+
+            if not items:
+                break
+
+            for m in items:
+                if processed >= CLEANUP_BATCH_SIZE:
+                    break
+
+                rel = m.get("properties", {}).get(rel_prop)
+                rel_list = (rel or {}).get("relation", []) or []
+                if not rel_list:
+                    processed += 1
                     continue
-                if espelho_props[target_prop] != "rich_text":
-                    print(f'⚠️ [{cfg["name"]}] "{target_prop}" não é rich_text. Pulando participantes.')
-                    continue
 
-                sep = tcfg.get("separator", ", ")
-                texto = people_to_text(src_prop, sep=sep)
-                props_out[target_prop] = {"rich_text": to_rich_text(texto)}
+                oid = rel_list[0].get("id")
+                if oid and oid not in origin_ids:
+                    notion_patch(
+                        f"/pages/{m['id']}",
+                        {"archived": True},
+                        context=f"Arquivar órfão ({cfg['name']}) espelho_id={m['id']} origin_id={oid}",
+                    )
+                    archived += 1
 
-        if not existing:
-            notion_post(
-                "/pages",
-                {"parent": {"database_id": espelho_id}, "properties": props_out},
-                context=f'Criar espelho ({cfg["name"]}) origem_id={pid}',
-            )
-            created += 1
-        else:
-            mid = existing[0]["id"]
-            notion_patch(
-                f"/pages/{mid}",
-                {"properties": props_out},
-                context=f'Atualizar espelho ({cfg["name"]}) espelho_id={mid} origem_id={pid}',
-            )
-            updated += 1
+                processed += 1
 
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
+            if cursor is None:
+                break
 
-    print(f'✅ [{cfg["name"]}] Concluído | Criados: {created} | Atualizados: {updated}')
+        print(f"🧹 [{cfg['name']}] Cleanup batch | Verificados: {processed} | Órfãos arquivados: {archived} | Próximo cursor: {cursor}")
 
-    # =========================
-    # Limpeza de órfãos: "sumir" do espelho
-    # (Notion API não deleta permanentemente; arquiva.)
-    # =========================
-    if cfg.get("cleanup_orphans"):
-        mirrors_all = query_all(
-            espelho_id,
-            {"page_size": 100},
-            context=f'Query ESPELHO ({cfg["name"]}) para limpeza',
-        )
+        s["cleanup_cursor"] = cursor
+        if cursor is None:
+            s["phase"] = "sync"
+            s["cursor"] = None
+            s["cleanup_cursor"] = None
 
-        orphan_archived = 0
-        for m in mirrors_all:
-            rel = m.get("properties", {}).get(rel_prop)
-            if not rel or rel.get("type") != "relation":
-                continue
-            rel_list = rel.get("relation", []) or []
-            if not rel_list:
-                continue
-            oid = rel_list[0].get("id")
-            if oid and oid not in origin_ids:
-                notion_patch(
-                    f"/pages/{m['id']}",
-                    {"archived": True},
-                    context=f'Arquivar órfão ({cfg["name"]}) espelho_id={m["id"]} origin_id={oid}',
-                )
-                orphan_archived += 1
-                time.sleep(SLEEP_BETWEEN_REQUESTS)
-
-        print(f'🧹 [{cfg["name"]}] Órfãos arquivados no espelho: {orphan_archived}')
+        state[key] = s
+        save_state(state)
+        return
 
 # ======================================================
 # MAIN
@@ -319,8 +422,11 @@ def sync_mirror(cfg: Dict[str, Any]) -> None:
 def main():
     if not NOTION_API_KEY:
         raise RuntimeError("Faltando NOTION_API_KEY.")
+
+    state = load_state()
+
     for cfg in MIRRORS:
-        sync_mirror(cfg)
+        sync_mirror(cfg, state)
 
 if __name__ == "__main__":
     main()
