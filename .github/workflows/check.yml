@@ -50,3 +50,5 @@ jobs:
           DATABASE_ID_CALENDARIOEDITORIAL: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
+          PROP_TITULO_ESPELHO: "Evento"
+          PROP_RELACAO: "Origem"
