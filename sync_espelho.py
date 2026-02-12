@@ -12,19 +12,13 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
 DATABASE_ID_REUNIOES_ESPELHO = os.getenv("DATABASE_ID_REUNIOES_ESPELHO")
 
-# Relation no ESPELHO apontando para a origem
 PROP_RELACAO = os.getenv("PROP_RELACAO", "Origem")
-
-# Nome da propriedade de título na base ESPELHO (no Notion costuma ser "Name")
-PROP_TITULO_ESPELHO = os.getenv("PROP_TITULO_ESPELHO", "Name")
-
-# Se você quiser usar uma prop específica da origem como "Evento" para título
-# (precisa ser do tipo Title na origem). Se vazio, usa o título padrão do item.
-ORIGEM_TITLE_PROP = os.getenv("ORIGEM_TITLE_PROP", "Evento").strip()
+PROP_TITULO_ESPELHO = os.getenv("PROP_TITULO_ESPELHO", "Evento")
+ORIGEM_TITLE_PROP = os.getenv("ORIGEM_TITLE_PROP", "").strip()  # opcional
 
 # ======================================================
 # 🔧 MAPA DE PROPRIEDADES COPIADAS (EDITE AQUI)
-# origem -> espelho (nomes EXATOS no Notion)
+# origem -> espelho
 # ======================================================
 PROPS_MAP = {
     "Data": "Data",
@@ -46,7 +40,7 @@ HEADERS = {
 }
 
 # ======================================================
-# HTTP helpers (com log detalhado)
+# HTTP helpers
 # ======================================================
 def _raise_with_details(r: requests.Response, context: str, payload: Dict[str, Any] | None = None) -> None:
     try:
@@ -89,20 +83,16 @@ def notion_patch(path: str, payload: Dict[str, Any], context: str) -> Dict[str, 
 def query_all(database_id: str, payload: Dict[str, Any], context: str) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     cursor = None
-
     while True:
         body = dict(payload)
         if cursor:
             body["start_cursor"] = cursor
-
         data = notion_post(f"/databases/{database_id}/query", body, context=context)
         results.extend(data.get("results", []))
-
         if not data.get("has_more"):
             break
         cursor = data.get("next_cursor")
         time.sleep(0.2)
-
     return results
 
 def list_properties(database_id: str) -> Dict[str, str]:
@@ -124,9 +114,48 @@ def extract_text_from_title_prop(page: Dict[str, Any], prop_name: str) -> str:
     parts = prop.get("title", [])
     return "".join(p.get("plain_text", "") for p in parts).strip()
 
-def copy_property(prop: Dict[str, Any]) -> Dict[str, Any]:
+# ✅ CORREÇÃO AQUI: normalizar status/select/multi_select por "name"
+def normalize_property_for_write(prop: Dict[str, Any]) -> Dict[str, Any]:
     t = prop.get("type")
-    # mantém o payload original do tipo
+
+    # Status: enviar somente name (nunca id)
+    if t == "status":
+        status_obj = prop.get("status")
+        if not status_obj:
+            return {"status": None}
+        name = status_obj.get("name")
+        return {"status": {"name": name}} if name else {"status": None}
+
+    # Select: enviar somente name
+    if t == "select":
+        sel = prop.get("select")
+        if not sel:
+            return {"select": None}
+        name = sel.get("name")
+        return {"select": {"name": name}} if name else {"select": None}
+
+    # Multi-select: lista por name
+    if t == "multi_select":
+        arr = prop.get("multi_select", []) or []
+        return {"multi_select": [{"name": o.get("name")} for o in arr if o.get("name")]}
+
+    # People: pode copiar direto
+    if t == "people":
+        return {"people": prop.get("people", []) or []}
+
+    # Date: copiar direto (pode ser null)
+    if t == "date":
+        return {"date": prop.get("date")}
+
+    # Rich text: copiar direto
+    if t == "rich_text":
+        return {"rich_text": prop.get("rich_text", []) or []}
+
+    # Number, checkbox, url, email, phone, etc.:
+    if t in ("number", "checkbox", "url", "email", "phone_number"):
+        return {t: prop.get(t)}
+
+    # Fallback: tenta copiar o conteúdo cru do tipo
     return {t: prop.get(t)}
 
 # ======================================================
@@ -140,11 +169,9 @@ def main():
     if missing:
         raise RuntimeError(f"Faltando env vars: {', '.join(missing)}")
 
-    # (Opcional, mas útil) validar que as props existem — ajuda a evitar 400
     origem_props = list_properties(DATABASE_ID_REUNIOES)
     espelho_props = list_properties(DATABASE_ID_REUNIOES_ESPELHO)
 
-    # valida relation e title do espelho
     if PROP_RELACAO not in espelho_props:
         print(f'\n❌ A relation "{PROP_RELACAO}" não existe na base ESPELHO.')
         print("Propriedades ESPELHO:")
@@ -152,21 +179,14 @@ def main():
             print(f" - {k} -> {v}")
         raise RuntimeError("Crie a relation no espelho ou ajuste PROP_RELACAO.")
 
-    if PROP_TITULO_ESPELHO not in espelho_props:
-        print(f'\n❌ A propriedade de título "{PROP_TITULO_ESPELHO}" não existe na base ESPELHO.')
+    if PROP_TITULO_ESPELHO not in espelho_props or espelho_props[PROP_TITULO_ESPELHO] != "title":
+        print(f'\n❌ A propriedade de título "{PROP_TITULO_ESPELHO}" não existe (ou não é title) na base ESPELHO.')
         print("Propriedades ESPELHO:")
         for k, v in sorted(espelho_props.items()):
             print(f" - {k} -> {v}")
         raise RuntimeError("Ajuste PROP_TITULO_ESPELHO para o nome exato do title no espelho.")
 
-    # valida props do mapa
-    for o, e in PROPS_MAP.items():
-        if o not in origem_props:
-            print(f'\n⚠️ Origem não tem a prop "{o}" (mapa). Ela será ignorada.')
-        if e not in espelho_props:
-            print(f'\n⚠️ Espelho não tem a prop "{e}" (mapa). Ela será ignorada.')
-
-    # 1) Buscar TODAS as reuniões da origem
+    # 1) Buscar todas as reuniões da origem
     reunioes = query_all(
         DATABASE_ID_REUNIOES,
         {"page_size": 100},
@@ -180,7 +200,7 @@ def main():
     for r in reunioes:
         origem_id = r["id"]
 
-        # 2) Verificar espelho existente pela relation
+        # 2) Buscar espelho existente
         espelhos = query_all(
             DATABASE_ID_REUNIOES_ESPELHO,
             {
@@ -193,23 +213,25 @@ def main():
             context="Query ESPELHO (relation contains origem_id)",
         )
 
-        # 3) Título do espelho
+        # 3) Título
         title_text = ""
         if ORIGEM_TITLE_PROP:
             title_text = extract_text_from_title_prop(r, ORIGEM_TITLE_PROP)
         if not title_text:
             title_text = extract_plain_text_title_from_page(r)
 
-        # 4) Montar propriedades do espelho
         props_out: Dict[str, Any] = {
             PROP_RELACAO: {"relation": [{"id": origem_id}]},
             PROP_TITULO_ESPELHO: {"title": [{"text": {"content": title_text}}]},
         }
 
+        # 4) Copiar props permitidas
         for origem_prop, espelho_prop in PROPS_MAP.items():
+            if espelho_prop not in espelho_props:
+                continue
             prop_data = r["properties"].get(origem_prop)
-            if prop_data and (espelho_prop in espelho_props):
-                props_out[espelho_prop] = copy_property(prop_data)
+            if prop_data:
+                props_out[espelho_prop] = normalize_property_for_write(prop_data)
 
         # 5) Criar ou atualizar
         if not espelhos:
@@ -222,7 +244,6 @@ def main():
                 context=f"Criar espelho (origem_id={origem_id})",
             )
             created += 1
-            print(f"➕ Criado: {title_text}")
         else:
             espelho_id = espelhos[0]["id"]
             notion_patch(
@@ -231,7 +252,6 @@ def main():
                 context=f"Atualizar espelho (espelho_id={espelho_id} origem_id={origem_id})",
             )
             updated += 1
-            print(f"🔄 Atualizado: {title_text}")
 
         time.sleep(0.2)
 
