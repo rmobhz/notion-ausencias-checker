@@ -15,15 +15,11 @@ INDEX_FILE = os.path.join(STATE_DIR, "mirror_index.json")
 
 BASE_SLEEP = float(os.getenv("MIRROR_BASE_SLEEP", "0.15"))
 MAX_RETRIES = int(os.getenv("MIRROR_MAX_RETRIES", "8"))
-
-# Limpeza de órfãos roda no máximo 1x a cada N horas
 CLEANUP_EVERY_HOURS = int(os.getenv("MIRROR_CLEANUP_EVERY_HOURS", "24"))
-
-# Máximo de itens mudados por execução (0 = sem limite)
 MAX_CHANGED_PER_RUN = int(os.getenv("MIRROR_MAX_CHANGED_PER_RUN", "0"))
 
-# Log de diagnóstico (sem expor nomes): 0 desliga; >0 mostra contagens nos N primeiros itens
-DEBUG_PEOPLE_SAMPLES = int(os.getenv("MIRROR_DEBUG_PEOPLE_SAMPLES", "0"))
+# salva estado/índice a cada N itens processados (além de salvar após create)
+SAVE_EVERY_N = int(os.getenv("MIRROR_SAVE_EVERY_N", "10"))
 
 MIRRORS = [
     {
@@ -38,12 +34,17 @@ MIRRORS = [
         # fácil editar
         "copy_props": ["Data", "Local", "Status"],
 
+        # Participantes agora é o MESMO nome no espelho, e você quer nomes
         "transforms": {
             "Participantes": {
                 "mode": "people_to_public_text",
                 "target_prop": "Participantes",
-                "people_public_mode": "names",
+                "people_public_mode": "names",   # <— nomes separados por vírgula
                 "separator": ", ",
+                # fallback caso não consiga nome (ex. guest sem permissão)
+                "fallback_mode": "count",
+                "label_singular": "participante",
+                "label_plural": "participantes",
             }
         },
 
@@ -215,6 +216,10 @@ def to_rich_text(text: str) -> List[Dict[str, Any]]:
         return []
     return [{"type": "text", "text": {"content": text}}]
 
+def rich_text_plain_text(rt: List[Dict[str, Any]]) -> str:
+    # transforma qualquer rich_text (com mentions etc.) em texto simples seguro
+    return "".join(x.get("plain_text", "") for x in (rt or [])).strip()
+
 def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_espelho: List[str]) -> Optional[Dict[str, Any]]:
     src_type = prop.get("type")
 
@@ -222,7 +227,9 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
         return {"date": prop.get("date")}
 
     if target_type == "rich_text" and src_type == "rich_text":
-        return {"rich_text": prop.get("rich_text", []) or []}
+        # ✅ NÃO copiar estrutura (mentions, etc.). Sempre reduzir a plain_text.
+        txt = rich_text_plain_text(prop.get("rich_text", []) or [])
+        return {"rich_text": to_rich_text(txt)}
 
     if target_type == "status" and src_type == "status":
         name = (prop.get("status") or {}).get("name")
@@ -235,18 +242,12 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
     return None
 
 # =============================
-# Robust people fetch (fallback)
-#   ✅ IMPORTANT: pagination uses `next_url`
+# People fallback (next_url pagination)
 # =============================
 def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any]]:
-    """
-    Retrieve a page property item for People.
-    Pagination must follow `next_url` (NOT start_cursor/next_cursor).
-    """
     people: List[Dict[str, Any]] = []
     url = f"{BASE_URL}/pages/{page_id}/properties/{prop_id}"
 
-    # safety cap
     for _ in range(1000):
         data = request_with_retry_url("GET", url, None, context=f"Get page property item (people) page={page_id}")
 
@@ -267,19 +268,28 @@ def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any
 
     return people
 
-def make_participants_public_text(people_items: List[Dict[str, Any]], mode: str, sep: str, singular: str, plural: str) -> str:
+def make_participants_text(
+    people_items: List[Dict[str, Any]],
+    mode: str,
+    sep: str,
+    fallback_mode: str,
+    singular: str,
+    plural: str
+) -> str:
+    names = [p.get("name") for p in people_items if p.get("name")]
+    names = [n for n in names if n]
     count = len([p for p in people_items if p.get("id") or p.get("name")])
+
+    if mode == "names":
+        if names:
+            return sep.join(names)
+        # se não tiver nomes (limitação de permissão), cai no fallback
+        mode = fallback_mode
 
     if mode == "count":
         if count == 0:
             return ""
         return f"{count} {singular if count == 1 else plural}"
-
-    names = [p.get("name") for p in people_items if p.get("name")]
-    names = [n for n in names if n]
-
-    if mode == "names":
-        return sep.join(names)
 
     # names_or_count
     if names:
@@ -287,6 +297,23 @@ def make_participants_public_text(people_items: List[Dict[str, Any]], mode: str,
     if count == 0:
         return ""
     return f"{count} {singular if count == 1 else plural}"
+
+# =============================
+# Lookup no espelho (anti-duplicação)
+# =============================
+def find_mirror_by_relation(espelho_db: str, rel_prop: str, origem_page_id: str) -> Optional[str]:
+    payload = {
+        "page_size": 1,
+        "filter": {
+            "property": rel_prop,
+            "relation": {"contains": origem_page_id}
+        }
+    }
+    data = query_database(espelho_db, payload, context=f"Lookup espelho by relation origem_id={origem_page_id}")
+    results = data.get("results", []) or []
+    if results:
+        return results[0]["id"]
+    return None
 
 # =============================
 # Incremental sync
@@ -299,11 +326,11 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
 
     k = mirror_key(cfg, origem_db, espelho_db)
     mirror_state = state.get(k, {})
-    last_sync = mirror_state.get("last_sync_time")  # ISO UTC
+    last_sync = mirror_state.get("last_sync_time")
     last_sync_dt = _parse_iso(last_sync)
 
     origem_schema = get_database_schema(origem_db)
-    origem_props = {n: (origem_schema.get("properties") or {}).get(n, {}).get("type") for n in (origem_schema.get("properties") or {}).keys()}
+    origem_props_types = {n: (origem_schema.get("properties") or {}).get(n, {}).get("type") for n in (origem_schema.get("properties") or {}).keys()}
     espelho_props = list_properties(espelho_db)
 
     rel_prop = cfg["relation_prop_espelho"]
@@ -319,11 +346,13 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
     if "Status" in espelho_props and espelho_props["Status"] == "status":
         status_options = get_status_options(espelho_db, "Status")
 
+    # preparar fallback para people
     participants_prop_id = None
-    if cfg.get("transforms") and "Participantes" in cfg["transforms"]:
+    transforms = cfg.get("transforms", {}) or {}
+    if "Participantes" in transforms:
         participants_prop_id = get_property_id_from_schema(origem_schema, "Participantes")
 
-    # itens mudados desde last_sync
+    # query changed
     filter_obj = None
     if last_sync_dt:
         filter_obj = {"timestamp": "last_edited_time", "last_edited_time": {"after": last_sync_dt.isoformat()}}
@@ -355,9 +384,9 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
     idx = index.setdefault(k, {})  # origem_id -> espelho_id
     created = 0
     updated = 0
-    newest_edited: Optional[str] = None
 
-    debug_left = DEBUG_PEOPLE_SAMPLES
+    processed = 0
+    newest_edited: Optional[str] = None
 
     for p in changed:
         origem_page_id = p["id"]
@@ -372,8 +401,9 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
             title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
         }
 
+        # copy props 1:1 (com sanitização de rich_text)
         for prop_name in cfg.get("copy_props", []):
-            if prop_name not in origem_props or prop_name not in espelho_props:
+            if prop_name not in origem_props_types or prop_name not in espelho_props:
                 continue
             src_prop = p["properties"].get(prop_name)
             if not src_prop:
@@ -382,12 +412,16 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
             if normalized is not None:
                 props_out[prop_name] = normalized
 
-        transforms = cfg.get("transforms", {}) or {}
+        # transforms (Participantes)
         for origem_prop_name, tcfg in transforms.items():
             mode = tcfg.get("mode")
             target_prop = tcfg.get("target_prop", origem_prop_name)
 
-            if origem_prop_name not in origem_props or target_prop not in espelho_props:
+            if origem_prop_name not in origem_props_types:
+                continue
+            if target_prop not in espelho_props:
+                continue
+            if espelho_props[target_prop] != "rich_text":
                 continue
 
             src_prop = p["properties"].get(origem_prop_name)
@@ -397,57 +431,73 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
             if mode == "people_to_public_text":
                 if src_prop.get("type") != "people":
                     continue
-                if espelho_props[target_prop] != "rich_text":
-                    continue
 
-                # people from query
+                # do query
                 people_items: List[Dict[str, Any]] = []
-                people_arr = src_prop.get("people", []) or []
-                for u in people_arr:
+                for u in (src_prop.get("people", []) or []):
                     people_items.append({"id": u.get("id"), "name": u.get("name")})
 
+                # fallback property item
                 q_count = len([x for x in people_items if x.get("id") or x.get("name")])
-
-                # fallback property item (next_url pagination)
-                f_count = 0
-                if (q_count == 0) and participants_prop_id:
+                if q_count == 0 and participants_prop_id:
                     try:
                         people_items = fetch_people_property_item(origem_page_id, participants_prop_id)
                     except Exception:
                         people_items = []
-                f_count = len([x for x in people_items if x.get("id") or x.get("name")])
 
-                if debug_left > 0:
-                    print(f"🧪 [{cfg['name']}] people origem_id={origem_page_id} query={q_count} fallback={f_count}")
-                    debug_left -= 1
-
-                people_mode = tcfg.get("people_public_mode", "count")
-                sep = tcfg.get("separator", ", ")
-                singular = tcfg.get("label_singular", "participante")
-                plural = tcfg.get("label_plural", "participantes")
-
-                texto = make_participants_public_text(people_items, people_mode, sep, singular, plural)
+                texto = make_participants_text(
+                    people_items=people_items,
+                    mode=tcfg.get("people_public_mode", "names_or_count"),
+                    sep=tcfg.get("separator", ", "),
+                    fallback_mode=tcfg.get("fallback_mode", "count"),
+                    singular=tcfg.get("label_singular", "participante"),
+                    plural=tcfg.get("label_plural", "participantes"),
+                )
                 props_out[target_prop] = {"rich_text": to_rich_text(texto)}
 
+        # anti-dup: resolve mirror_id pelo índice; se não tiver, procura no espelho
         mirror_id = idx.get(origem_page_id)
+        if not mirror_id:
+            mirror_id = find_mirror_by_relation(espelho_db, rel_prop, origem_page_id)
+            if mirror_id:
+                idx[origem_page_id] = mirror_id
+                _save_json(INDEX_FILE, index)  # salva imediatamente
 
-        if mirror_id:
-            notion_patch(
-                f"/pages/{mirror_id}",
-                {"properties": props_out},
-                context=f"Incremental update ({cfg['name']}) espelho_id={mirror_id}",
-            )
-            updated += 1
-        else:
-            created_page = notion_post(
-                "/pages",
-                {"parent": {"database_id": espelho_db}, "properties": props_out},
-                context=f"Incremental create ({cfg['name']}) origem_id={origem_page_id}",
-            )
-            idx[origem_page_id] = created_page["id"]
-            created += 1
+        try:
+            if mirror_id:
+                notion_patch(
+                    f"/pages/{mirror_id}",
+                    {"properties": props_out},
+                    context=f"Incremental update ({cfg['name']}) espelho_id={mirror_id}",
+                )
+                updated += 1
+            else:
+                created_page = notion_post(
+                    "/pages",
+                    {"parent": {"database_id": espelho_db}, "properties": props_out},
+                    context=f"Incremental create ({cfg['name']}) origem_id={origem_page_id}",
+                )
+                idx[origem_page_id] = created_page["id"]
+                created += 1
 
-    # Atualiza last_sync_time apenas se processou algo
+                # ✅ salva índice imediatamente para evitar duplicação em caso de cancelamento
+                _save_json(INDEX_FILE, index)
+
+        except Exception as e:
+            # não derruba a execução inteira por um item ruim
+            print(f"⚠️ [{cfg['name']}] Falha ao sincronizar origem_id={origem_page_id}. Pulando item. Erro: {e}")
+            continue
+
+        processed += 1
+        if processed % SAVE_EVERY_N == 0:
+            # salva progresso parcial
+            if newest_edited:
+                mirror_state["last_sync_time"] = newest_edited
+                state[k] = mirror_state
+                _save_json(STATE_FILE, state)
+            _save_json(INDEX_FILE, index)
+
+    # salva no final
     if newest_edited:
         mirror_state["last_sync_time"] = newest_edited
         state[k] = mirror_state
@@ -478,7 +528,6 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
     origin_ids = {p["id"] for p in origin_pages}
 
     rel_prop = cfg["relation_prop_espelho"]
-
     cursor = None
     checked = 0
     archived = 0
@@ -507,7 +556,6 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
                 )
                 archived += 1
             checked += 1
-
             if checked % 80 == 0:
                 time.sleep(1.5)
 
@@ -518,6 +566,7 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
     state[k] = mirror_state
     _save_json(STATE_FILE, state)
 
+    # limpar index de ids que não existem mais
     idx = index.get(k, {})
     to_del = [oid for oid in idx.keys() if oid not in origin_ids]
     for oid in to_del:
