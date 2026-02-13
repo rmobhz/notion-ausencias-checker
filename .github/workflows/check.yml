@@ -2,8 +2,12 @@ name: Verificar Conflitos no Notion
 
 on:
   schedule:
-    - cron: "*/15 * * * *"  # Executa a cada 15 minutos
-  workflow_dispatch:        # Permite execução manual pelo GitHub
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: notion-automations
+  cancel-in-progress: true
 
 jobs:
   check-notion:
@@ -13,13 +17,15 @@ jobs:
       - name: Clonar repositório
         uses: actions/checkout@v3
 
-      - name: Restaurar estado (anti-flood)
-        uses: actions/cache@v4
+      # 1) RESTORE do estado
+      - name: Restaurar estado (.state)
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: .state
-          key: gcmd-conflicts-state-${{ github.run_id }}
+          key: gcmd-state-${{ github.run_number }}
           restore-keys: |
-            gcmd-conflicts-state-
+            gcmd-state-
 
       - name: Configurar Python
         uses: actions/setup-python@v4
@@ -29,24 +35,40 @@ jobs:
       - name: Instalar dependências
         run: pip install requests notion-client python-dateutil
 
-      - name: Executar scripts de verificação e automação
+      - name: Executar scripts (não espelho)
         run: |
-          echo "▶️ Verificando conflitos entre reuniões e ausências..."
-          python notion_check.py
-          echo "▶️ Verificando conflitos de sala GCMD..."
-          python check_gcmd_room_conflicts.py
-          echo "▶️ Verificando calendário editorial..."
-          python notion_check_calendario.py
-          echo "▶️ Criando reuniões recorrentes..."
-          python create_recurring_meetings.py
+          # echo "▶️ Verificando conflitos entre reuniões e ausências..."
+          # python notion_check.py
+          # echo "▶️ Verificando conflitos de sala GCMD..."
+          # python check_gcmd_room_conflicts.py
+          # echo "▶️ Verificando calendário editorial..."
+          # python notion_check_calendario.py
+          # echo "▶️ Criando reuniões recorrentes..."
+          # python create_recurring_meetings.py
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
+          DATABASE_ID_REUNIOES_TESTE: ${{ secrets.DATABASE_ID_REUNIOES_TESTE }}
+          DATABASE_ID_AUSENCIAS: ${{ secrets.DATABASE_ID_AUSENCIAS }}
+          DATABASE_ID_CALENDARIOEDITORIAL: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
+
+      # 2) Sync do espelho (sempre roda)
+      - name: Sincronizar bases espelho (sempre)
+        if: always()
+        run: |
           echo "▶️ Sincronizando bases espelho a serem publicadas..."
           python sync_espelho.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
-          DATABASE_ID_REUNIOES_TESTE: ${{ secrets.DATABASE_ID_REUNIOES_TESTE }}
           DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
-          DATABASE_ID_AUSENCIAS: ${{ secrets.DATABASE_ID_AUSENCIAS }}
-          DATABASE_ID_CALENDARIOEDITORIAL: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
+
+      # 3) SAVE do estado (key nova)
+      - name: Salvar estado (.state)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: gcmd-state-${{ github.run_number }}
