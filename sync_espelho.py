@@ -142,7 +142,6 @@ def request_with_retry_url(method: str, url: str, payload: Optional[Dict[str, An
 
         if not r.ok:
             details = _parse_json_safe(r)
-            # levanta erro mas com contexto; loop decide se loga muito ou pouco
             err = requests.HTTPError(f"{r.status_code} Client Error: {details.get('message','')}")
             err.response = r
             err._notion_details = details  # type: ignore[attr-defined]
@@ -406,7 +405,7 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
     created = 0
     updated = 0
     skipped_create = 0
-    skipped_archived = 0
+    unarchived = 0
     failed_other = 0
 
     processed = 0
@@ -495,14 +494,24 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
                     )
                     updated += 1
                 except Exception as e:
-                    # ✅ regra do Rafael: não desarquiva; apenas pula updates em arquivados
                     if is_archived_edit_error(e):
-                        skipped_archived += 1
+                        # ✅ agora você quer editar: desarquiva e tenta de novo
+                        notion_patch(
+                            f"/pages/{mirror_id}",
+                            {"archived": False},
+                            context=f"Unarchive espelho ({cfg['name']}) espelho_id={mirror_id}",
+                        )
+                        unarchived += 1
+                        notion_patch(
+                            f"/pages/{mirror_id}",
+                            {"properties": props_out},
+                            context=f"Update espelho (retry) ({cfg['name']}) espelho_id={mirror_id}",
+                        )
+                        updated += 1
                     else:
                         failed_other += 1
                         if not MIRROR_QUIET_ITEM_ERRORS:
-                            print(f"⚠️ [{cfg['name']}] Falha update (não-archived) espelho_id={mirror_id} origem_id={origem_page_id}: {notion_error_message(e)}")
-                # segue
+                            print(f"⚠️ [{cfg['name']}] Falha update espelho_id={mirror_id} origem_id={origem_page_id}: {notion_error_message(e)}")
             else:
                 if force_full and MIRROR_FULL_SYNC_UPDATE_ONLY:
                     skipped_create += 1
@@ -523,7 +532,6 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
 
         processed += 1
         if processed % SAVE_EVERY_N == 0:
-            # checkpoint só no incremental (full só se você pedir)
             if (not force_full) and newest_edited:
                 mirror_state["last_sync_time"] = newest_edited
                 state[k] = mirror_state
@@ -545,6 +553,7 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
             mirror_state["last_sync_time"] = newest_edited
             state[k] = mirror_state
             _save_json(STATE_FILE, state)
+
         _save_json(INDEX_FILE, index)
 
     if force_full and (not MIRROR_FULL_SYNC_UPDATE_CHECKPOINT):
@@ -552,9 +561,9 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
 
     print(
         f"✅ [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} "
-        f"| Criados={created} | Atualizados={updated} "
-        f"| SkippedCreate={skipped_create} | SkippedArchivedUpdates={skipped_archived} "
-        f"| FalhasOutras={failed_other} | last_sync_time={state.get(k, {}).get('last_sync_time')}"
+        f"| Criados={created} | Atualizados={updated} | Unarchived={unarchived} "
+        f"| SkippedCreate={skipped_create} | FalhasOutras={failed_other} "
+        f"| last_sync_time={state.get(k, {}).get('last_sync_time')}"
     )
 
 # =============================
@@ -603,7 +612,6 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
                 continue
             oid = rel_list[0].get("id")
             if oid and oid not in origin_ids:
-                # arquiva órfãos
                 try:
                     notion_patch(
                         f"/pages/{m['id']}",
@@ -624,7 +632,6 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
     state[k] = mirror_state
     _save_json(STATE_FILE, state)
 
-    # limpar index de ids que não existem mais
     idx = index.get(k, {})
     to_del = [oid for oid in idx.keys() if oid not in origin_ids]
     for oid in to_del:
@@ -649,7 +656,7 @@ def main():
     for cfg in MIRRORS:
         sync(cfg, state, index, force_full=MIRROR_FORCE_FULL_SYNC)
 
-        # ✅ evita “briga” durante full sync
+        # evita “briga” durante full sync
         if not MIRROR_FORCE_FULL_SYNC:
             cleanup_orphans(cfg, state, index)
         else:
