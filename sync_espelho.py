@@ -45,7 +45,7 @@ MIRRORS = [
                 "people_public_mode": "names",
                 "separator": ", ",
             }
-        }
+        },
 
         "cleanup_orphans": True,
     }
