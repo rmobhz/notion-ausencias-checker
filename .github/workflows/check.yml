@@ -69,7 +69,7 @@ jobs:
           # MIRROR_BASE_SLEEP: "0.2"
           # MIRROR_MAX_RETRIES: "10"
           # MIRROR_CLEANUP_EVERY_HOURS: "24"
-          # MIRROR_MAX_CHANGED_PER_RUN: "300"
+          MIRROR_MAX_CHANGED_PER_RUN: "50"
 
       # ✅ SAVE do estado (.state) — key nova por run (cache é imutável)
       - name: Salvar estado (.state)
