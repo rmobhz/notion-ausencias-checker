@@ -71,7 +71,7 @@ jobs:
           # MIRROR_CLEANUP_EVERY_HOURS: "24"
           # MIRROR_MAX_CHANGED_PER_RUN: "50"
           # MIRROR_DEBUG_PEOPLE_SAMPLES: "5"
-          # MIRROR_FORCE_FULL_SYNC: "1"
+          MIRROR_FORCE_FULL_SYNC: "1"
 
       # ✅ SAVE do estado (.state) — key nova por run (cache é imutável)
       - name: Salvar estado (.state)
