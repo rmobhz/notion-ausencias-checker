@@ -1,666 +1,398 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-import time
 import json
-import random
+import time
 import requests
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-# =============================
-# CONFIG
-# =============================
-STATE_DIR = ".state"
-STATE_FILE = os.path.join(STATE_DIR, "mirror_state.json")
-INDEX_FILE = os.path.join(STATE_DIR, "mirror_index.json")
-
-BASE_SLEEP = float(os.getenv("MIRROR_BASE_SLEEP", "0.15"))
-MAX_RETRIES = int(os.getenv("MIRROR_MAX_RETRIES", "8"))
-CLEANUP_EVERY_HOURS = int(os.getenv("MIRROR_CLEANUP_EVERY_HOURS", "24"))
-MAX_CHANGED_PER_RUN = int(os.getenv("MIRROR_MAX_CHANGED_PER_RUN", "0"))
-
-# salva estado/índice a cada N itens processados (além de salvar após create)
-SAVE_EVERY_N = int(os.getenv("MIRROR_SAVE_EVERY_N", "10"))
-
-def env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-# ✅ força varredura completa (ignora last_sync_time)
-MIRROR_FORCE_FULL_SYNC = env_bool("MIRROR_FORCE_FULL_SYNC", False)
-
-# opcional: em full sync, só atualiza os já existentes (não cria novos)
-MIRROR_FULL_SYNC_UPDATE_ONLY = env_bool("MIRROR_FULL_SYNC_UPDATE_ONLY", False)
-
-# opcional: em full sync, também atualiza last_sync_time ao final (padrão: não)
-MIRROR_FULL_SYNC_UPDATE_CHECKPOINT = env_bool("MIRROR_FULL_SYNC_UPDATE_CHECKPOINT", False)
-
-# ✅ reduz log de erros repetitivos no loop
-MIRROR_QUIET_ITEM_ERRORS = env_bool("MIRROR_QUIET_ITEM_ERRORS", True)
-
-MIRRORS = [
-    {
-        "name": "Reuniões",
-        "env_origem": "DATABASE_ID_REUNIOES",
-        "env_espelho": "DATABASE_ID_REUNIOES_ESPELHO",
-
-        "relation_prop_espelho": "Origem",
-        "title_prop_origem": "Evento",
-        "title_prop_espelho": "Evento",
-
-        "copy_props": ["Data", "Local", "Status"],
-
-        "transforms": {
-            "Participantes": {
-                "mode": "people_to_public_text",
-                "target_prop": "Participantes",
-                "people_public_mode": "names",
-                "separator": ", ",
-                "fallback_mode": "count",
-                "label_singular": "participante",
-                "label_plural": "participantes",
-            }
-        },
-
-        "cleanup_orphans": True,
-    }
-]
-
-# =============================
-# NOTION API
-# =============================
+# =========================
+# ENV / CONFIG
+# =========================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_VERSION = "2022-06-28"
 BASE_URL = "https://api.notion.com/v1"
-HEADERS = {
-    "Authorization": f"Bearer {NOTION_API_KEY}",
-    "Notion-Version": NOTION_VERSION,
-    "Content-Type": "application/json",
-}
 
-# =============================
-# Helpers: keys/state/index
-# =============================
-def mirror_key(cfg: Dict[str, Any], origem_db: str, espelho_db: str) -> str:
-    return f'{cfg.get("name","mirror")}::{origem_db}::{espelho_db}'
+STATE_DIR = ".state"
 
-def _load_json(path: str, default: Any) -> Any:
+# Seleção do que roda (por padrão, só YouTube)
+RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
+RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
+
+# Segurança / teste
+MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"     # se 1, não cria/atualiza
+MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())           # 0 = sem limite; >0 limita itens processados
+
+# Execução
+MIRROR_FORCE_FULL_SYNC = os.getenv("MIRROR_FORCE_FULL_SYNC", "1").strip() == "1"
+MIRROR_INCREMENTAL = os.getenv("MIRROR_INCREMENTAL", "0").strip() == "1"
+MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
+
+MIRROR_SLEEP_MS = int(os.getenv("MIRROR_SLEEP_MS", "150").strip())
+SLEEP_SEC = max(0, MIRROR_SLEEP_MS) / 1000.0
+
+# Janela: a partir de 2026
+DATE_FROM = "2026-01-01"
+
+
+# =========================
+# HTTP helpers
+# =========================
+def notion_headers() -> Dict[str, str]:
+    if not NOTION_API_KEY:
+        raise RuntimeError("Faltou NOTION_API_KEY no env.")
+    return {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def http_post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    r = requests.post(url, headers=notion_headers(), json=payload, timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} POST {url}\n{r.text}")
+    return r.json()
+
+
+def http_patch(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    r = requests.patch(url, headers=notion_headers(), json=payload, timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} PATCH {url}\n{r.text}")
+    return r.json()
+
+
+# =========================
+# Estado local por espelho
+# =========================
+def state_path(mirror_name: str) -> str:
+    safe = "".join(c for c in mirror_name.lower() if c.isalnum() or c in ("-", "_"))
+    return os.path.join(STATE_DIR, f"mirror_{safe}.json")
+
+
+def load_state(mirror_name: str) -> Dict[str, Any]:
     os.makedirs(STATE_DIR, exist_ok=True)
+    path = state_path(mirror_name)
     if not os.path.exists(path):
-        return default
+        return {"mappings": {}, "last_sync_time": None}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def _save_json(path: str, data: Any) -> None:
+
+def save_state(mirror_name: str, state: Dict[str, Any]) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    path = state_path(mirror_name)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
-def _parse_iso(dt: Optional[str]) -> Optional[datetime]:
-    if not dt:
-        return None
-    try:
-        return datetime.fromisoformat(dt.replace("Z", "+00:00"))
-    except Exception:
-        return None
+# =========================
+# Utilitários Notion props
+# =========================
+READ_ONLY_TYPES = {
+    "formula",
+    "rollup",
+    "created_time",
+    "last_edited_time",
+    "created_by",
+    "last_edited_by",
+    "unique_id",
+    "button",
+}
 
-# =============================
-# HTTP with retry/backoff
-# =============================
-def _parse_json_safe(r: requests.Response) -> Dict[str, Any]:
-    try:
-        return r.json()
-    except Exception:
-        return {"raw_text": r.text}
 
-def request_with_retry_url(method: str, url: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
-    for attempt in range(MAX_RETRIES + 1):
-        if method == "GET":
-            r = requests.get(url, headers=HEADERS, timeout=60)
-        elif method == "POST":
-            r = requests.post(url, headers=HEADERS, json=payload, timeout=60)
-        elif method == "PATCH":
-            r = requests.patch(url, headers=HEADERS, json=payload, timeout=60)
-        else:
-            raise ValueError("Unsupported method")
+def is_archived(page: Dict[str, Any]) -> bool:
+    return bool(page.get("archived", False))
 
-        if r.status_code == 429 or (500 <= r.status_code <= 599):
-            wait = min(60, (2 ** attempt)) + random.uniform(0, 0.6)
-            ra = r.headers.get("Retry-After")
-            if ra:
-                try:
-                    wait = max(wait, float(ra))
-                except Exception:
-                    pass
-            print(f"⚠️ {r.status_code} em {context}. Tentativa {attempt+1}/{MAX_RETRIES+1}. Aguardando {wait:.1f}s.")
-            time.sleep(wait)
-            continue
 
-        if not r.ok:
-            details = _parse_json_safe(r)
-            err = requests.HTTPError(f"{r.status_code} Client Error: {details.get('message','')}")
-            err.response = r
-            err._notion_details = details  # type: ignore[attr-defined]
-            raise err
-
-        time.sleep(BASE_SLEEP)
-        return r.json()
-
-    raise RuntimeError(f"Falhou após retries: {context}")
-
-def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
-    url = f"{BASE_URL}{path}"
-    return request_with_retry_url(method, url, payload, context)
-
-def notion_get(path: str, context: str) -> Dict[str, Any]:
-    return request_with_retry("GET", path, None, context)
-
-def notion_post(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    return request_with_retry("POST", path, payload, context=context)
-
-def notion_patch(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    return request_with_retry("PATCH", path, payload, context=context)
-
-def notion_error_message(e: Exception) -> str:
-    if isinstance(e, requests.HTTPError):
-        try:
-            details = getattr(e, "_notion_details", None)
-            if isinstance(details, dict) and details.get("message"):
-                return str(details.get("message"))
-        except Exception:
-            pass
-        try:
-            if e.response is not None:
-                d = e.response.json()
-                return str(d.get("message") or "")
-        except Exception:
-            pass
-    return str(e)
-
-def is_archived_edit_error(e: Exception) -> bool:
-    msg = notion_error_message(e).lower()
-    return "archived" in msg and "can't edit" in msg
-
-# =============================
-# Notion helpers
-# =============================
-def get_database_schema(database_id: str) -> Dict[str, Any]:
-    return notion_get(f"/databases/{database_id}", context="Get database schema")
-
-def list_properties(database_id: str) -> Dict[str, str]:
-    db = get_database_schema(database_id)
-    props = db.get("properties", {})
-    return {name: props[name].get("type") for name in props.keys()}
-
-def get_property_id_from_schema(schema: Dict[str, Any], prop_name: str) -> Optional[str]:
-    prop = (schema.get("properties") or {}).get(prop_name)
+def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not prop:
         return None
-    return prop.get("id")
+    t = prop.get("type")
+    if not t or t in READ_ONLY_TYPES:
+        return None
 
-def get_status_options(database_id: str, status_prop_name: str) -> List[str]:
-    db = get_database_schema(database_id)
-    prop = db.get("properties", {}).get(status_prop_name)
-    if not prop or prop.get("type") != "status":
-        return []
-    options = prop.get("status", {}).get("options", []) or []
-    return [o.get("name") for o in options if o.get("name")]
+    if t == "title":
+        text = "".join([p.get("plain_text", "") for p in prop.get("title", [])])
+        return {"title": [{"type": "text", "text": {"content": text}}]}
+    if t == "rich_text":
+        text = "".join([p.get("plain_text", "") for p in prop.get("rich_text", [])])
+        return {"rich_text": [{"type": "text", "text": {"content": text}}]} if text else {"rich_text": []}
+    if t == "number":
+        return {"number": prop.get("number")}
+    if t == "select":
+        sel = prop.get("select")
+        return {"select": sel} if sel else {"select": None}
+    if t == "multi_select":
+        return {"multi_select": prop.get("multi_select", [])}
+    if t == "status":
+        st = prop.get("status")
+        return {"status": {"name": st.get("name")}} if st and st.get("name") else {"status": None}
+    if t == "date":
+        return {"date": prop.get("date")}
+    if t == "checkbox":
+        return {"checkbox": bool(prop.get("checkbox", False))}
+    if t == "url":
+        return {"url": prop.get("url")}
+    if t == "email":
+        return {"email": prop.get("email")}
+    if t == "phone_number":
+        return {"phone_number": prop.get("phone_number")}
+    if t == "people":
+        ppl = prop.get("people", [])
+        return {"people": [{"id": p["id"]} for p in ppl if p.get("id")]}
+    if t == "relation":
+        rel = prop.get("relation", [])
+        return {"relation": [{"id": r["id"]} for r in rel if r.get("id")]}
+    if t == "files":
+        return {"files": prop.get("files", [])}
 
-def query_database(database_id: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    return notion_post(f"/databases/{database_id}/query", payload, context=context)
+    return None
 
-def query_all(database_id: str, payload: Dict[str, Any], context: str) -> List[Dict[str, Any]]:
+
+def build_dest_properties(source_page: Dict[str, Any], include_only_props: Optional[List[str]]) -> Dict[str, Any]:
+    src_props = source_page.get("properties", {}) or {}
+    dest: Dict[str, Any] = {}
+
+    for prop_name, prop in src_props.items():
+        if include_only_props is not None and prop_name not in include_only_props:
+            continue
+
+        payload = build_property_payload(prop)
+        if payload is not None:
+            dest[prop_name] = payload
+
+    return dest
+
+
+# =========================
+# Query com filtro de data (>= 2026-01-01)
+# =========================
+def query_database_pages(
+    db_id: str,
+    date_property_name: Optional[str],
+    date_from: str,
+    incremental_after: Optional[str],
+    sorts: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    url = f"{BASE_URL}/databases/{db_id}/query"
+
+    filters: List[Dict[str, Any]] = []
+
+    if date_property_name:
+        filters.append({"property": date_property_name, "date": {"on_or_after": date_from}})
+
+    if incremental_after:
+        filters.append({"timestamp": "last_edited_time", "last_edited_time": {"after": incremental_after}})
+
+    payload: Dict[str, Any] = {"page_size": 100}
+    if filters:
+        payload["filter"] = {"and": filters} if len(filters) > 1 else filters[0]
+    if sorts:
+        payload["sorts"] = sorts
+
     results: List[Dict[str, Any]] = []
-    cursor = None
+    next_cursor: Optional[str] = None
+
     while True:
-        body = dict(payload)
-        if cursor:
-            body["start_cursor"] = cursor
-        data = query_database(database_id, body, context=context)
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+        else:
+            payload.pop("start_cursor", None)
+
+        data = http_post(url, payload)
         results.extend(data.get("results", []))
-        if not data.get("has_more"):
+
+        if data.get("has_more"):
+            next_cursor = data.get("next_cursor")
+            time.sleep(SLEEP_SEC)
+        else:
             break
-        cursor = data.get("next_cursor")
+
     return results
 
-def extract_title(page: Dict[str, Any], title_prop_origem: str) -> str:
-    if title_prop_origem:
-        prop = page.get("properties", {}).get(title_prop_origem)
-        if prop and prop.get("type") == "title":
-            parts = prop.get("title", []) or []
-            txt = "".join(p.get("plain_text", "") for p in parts).strip()
-            if txt:
-                return txt
-    for prop in page.get("properties", {}).values():
-        if prop.get("type") == "title":
-            parts = prop.get("title", []) or []
-            return "".join(p.get("plain_text", "") for p in parts).strip()
-    return "(Sem título)"
 
-def to_rich_text(text: str) -> List[Dict[str, Any]]:
-    if not text:
-        return []
-    return [{"type": "text", "text": {"content": text}}]
+# =========================
+# Upsert
+# =========================
+def create_page_in_mirror(mirror_db_id: str, properties: Dict[str, Any]) -> str:
+    url = f"{BASE_URL}/pages"
+    payload = {"parent": {"database_id": mirror_db_id}, "properties": properties}
+    data = http_post(url, payload)
+    return data["id"]
 
-def rich_text_plain_text(rt: List[Dict[str, Any]]) -> str:
-    return "".join(x.get("plain_text", "") for x in (rt or [])).strip()
 
-def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_espelho: List[str]) -> Optional[Dict[str, Any]]:
-    src_type = prop.get("type")
+def update_page_in_mirror(page_id: str, properties: Dict[str, Any]) -> None:
+    url = f"{BASE_URL}/pages/{page_id}"
+    payload = {"properties": properties}
+    http_patch(url, payload)
 
-    if target_type == "date" and src_type == "date":
-        return {"date": prop.get("date")}
 
-    if target_type == "rich_text" and src_type == "rich_text":
-        txt = rich_text_plain_text(prop.get("rich_text", []) or [])
-        return {"rich_text": to_rich_text(txt)}
+def now_iso_z() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 
-    if target_type == "status" and src_type == "status":
-        name = (prop.get("status") or {}).get("name")
-        if not name:
-            return {"status": None}
-        if status_options_espelho and name not in status_options_espelho:
-            return {"status": None}
-        return {"status": {"name": name}}
 
-    return None
+def mirror_database(
+    name: str,
+    source_db_id: str,
+    mirror_db_id: str,
+    *,
+    include_only_props: Optional[List[str]],
+    date_property_name: Optional[str],
+    date_from: str,
+    sort_by_date: bool = True,
+) -> None:
+    state = load_state(name)
+    mappings: Dict[str, str] = state.get("mappings", {}) or {}
 
-# =============================
-# People fallback (next_url pagination)
-# =============================
-def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any]]:
-    people: List[Dict[str, Any]] = []
-    url = f"{BASE_URL}/pages/{page_id}/properties/{prop_id}"
+    incremental_after = None
+    if MIRROR_INCREMENTAL and not MIRROR_FORCE_FULL_SYNC:
+        incremental_after = state.get("last_sync_time")
 
-    for _ in range(1000):
-        data = request_with_retry_url("GET", url, None, context=f"Get page property item (people) page={page_id}")
-        results = data.get("results", []) or []
-        for it in results:
-            uid = it.get("id")
-            name = it.get("name")
-            if uid or name:
-                people.append({"id": uid, "name": name})
+    sorts = None
+    if sort_by_date and date_property_name:
+        sorts = [{"property": date_property_name, "direction": "ascending"}]
 
-        if not data.get("has_more"):
-            break
-        next_url = data.get("next_url")
-        if not next_url:
-            break
-        url = next_url
-
-    return people
-
-def make_participants_text(
-    people_items: List[Dict[str, Any]],
-    mode: str,
-    sep: str,
-    fallback_mode: str,
-    singular: str,
-    plural: str
-) -> str:
-    names = [p.get("name") for p in people_items if p.get("name")]
-    names = [n for n in names if n]
-    count = len([p for p in people_items if p.get("id") or p.get("name")])
-
-    if mode == "names":
-        if names:
-            return sep.join(names)
-        mode = fallback_mode
-
-    if mode == "count":
-        if count == 0:
-            return ""
-        return f"{count} {singular if count == 1 else plural}"
-
-    if names:
-        return sep.join(names)
-    if count == 0:
-        return ""
-    return f"{count} {singular if count == 1 else plural}"
-
-# =============================
-# Lookup no espelho (anti-duplicação)
-# =============================
-def find_mirror_by_relation(espelho_db: str, rel_prop: str, origem_page_id: str) -> Optional[str]:
-    payload = {
-        "page_size": 1,
-        "filter": {"property": rel_prop, "relation": {"contains": origem_page_id}}
-    }
-    data = query_database(espelho_db, payload, context=f"Lookup espelho by relation origem_id={origem_page_id}")
-    results = data.get("results", []) or []
-    if results:
-        return results[0]["id"]
-    return None
-
-# =============================
-# Core sync (incremental or full)
-# =============================
-def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], force_full: bool) -> None:
-    origem_db = os.getenv(cfg["env_origem"])
-    espelho_db = os.getenv(cfg["env_espelho"])
-    if not origem_db or not espelho_db:
-        raise RuntimeError(f'Faltando env vars para "{cfg["name"]}"')
-
-    k = mirror_key(cfg, origem_db, espelho_db)
-    mirror_state = state.get(k, {})
-    last_sync = mirror_state.get("last_sync_time")
-    last_sync_dt = _parse_iso(last_sync)
-
-    origem_schema = get_database_schema(origem_db)
-    origem_props_types = {n: (origem_schema.get("properties") or {}).get(n, {}).get("type") for n in (origem_schema.get("properties") or {}).keys()}
-    espelho_props = list_properties(espelho_db)
-
-    rel_prop = cfg["relation_prop_espelho"]
-    title_prop_espelho = cfg["title_prop_espelho"]
-    title_prop_origem = cfg.get("title_prop_origem", "")
-
-    if rel_prop not in espelho_props or espelho_props[rel_prop] != "relation":
-        raise RuntimeError(f'[{cfg["name"]}] Relation "{rel_prop}" inválida no espelho.')
-    if title_prop_espelho not in espelho_props or espelho_props[title_prop_espelho] != "title":
-        raise RuntimeError(f'[{cfg["name"]}] Title "{title_prop_espelho}" inválido no espelho.')
-
-    status_options = []
-    if "Status" in espelho_props and espelho_props["Status"] == "status":
-        status_options = get_status_options(espelho_db, "Status")
-
-    participants_prop_id = None
-    transforms = cfg.get("transforms", {}) or {}
-    if "Participantes" in transforms:
-        participants_prop_id = get_property_id_from_schema(origem_schema, "Participantes")
-
-    # Query origem (full ou incremental)
-    filter_obj = None
-    if (not force_full) and last_sync_dt:
-        filter_obj = {"timestamp": "last_edited_time", "last_edited_time": {"after": last_sync_dt.isoformat()}}
-
-    payload = {
-        "page_size": 100,
-        "sorts": [{"timestamp": "last_edited_time", "direction": "ascending"}],
-    }
-    if filter_obj:
-        payload["filter"] = filter_obj
-
-    changed: List[Dict[str, Any]] = []
-    cursor = None
-    while True:
-        body = dict(payload)
-        if cursor:
-            body["start_cursor"] = cursor
-        data = query_database(origem_db, body, context=f"Query origem ({cfg['name']}) mode={'FULL' if force_full else 'INCR'}")
-        changed.extend(data.get("results", []))
-        if (not force_full) and MAX_CHANGED_PER_RUN and len(changed) >= MAX_CHANGED_PER_RUN:
-            changed = changed[:MAX_CHANGED_PER_RUN]
-            break
-        if not data.get("has_more"):
-            break
-        cursor = data.get("next_cursor")
-
-    print(f"🔄 [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} | last_sync={last_sync or 'None'} | origem_itens={len(changed)} | update_only_full={MIRROR_FULL_SYNC_UPDATE_ONLY}")
-
-    idx = index.setdefault(k, {})  # origem_id -> espelho_id
-    created = 0
-    updated = 0
-    skipped_create = 0
-    unarchived = 0
-    failed_other = 0
-
-    processed = 0
-    newest_edited: Optional[str] = None
-
-    for p in changed:
-        origem_page_id = p["id"]
-        let = p.get("last_edited_time")
-        if let:
-            newest_edited = let
-
-        titulo = extract_title(p, title_prop_origem)
-
-        props_out: Dict[str, Any] = {
-            rel_prop: {"relation": [{"id": origem_page_id}]},
-            title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
-        }
-
-        # copy props
-        for prop_name in cfg.get("copy_props", []):
-            if prop_name not in origem_props_types or prop_name not in espelho_props:
-                continue
-            src_prop = p["properties"].get(prop_name)
-            if not src_prop:
-                continue
-            normalized = normalize_for_write(src_prop, espelho_props[prop_name], status_options)
-            if normalized is not None:
-                props_out[prop_name] = normalized
-
-        # transforms (Participantes)
-        for origem_prop_name, tcfg in transforms.items():
-            mode = tcfg.get("mode")
-            target_prop = tcfg.get("target_prop", origem_prop_name)
-
-            if origem_prop_name not in origem_props_types:
-                continue
-            if target_prop not in espelho_props:
-                continue
-            if espelho_props[target_prop] != "rich_text":
-                continue
-
-            src_prop = p["properties"].get(origem_prop_name)
-            if not src_prop:
-                continue
-
-            if mode == "people_to_public_text":
-                if src_prop.get("type") != "people":
-                    continue
-
-                people_items: List[Dict[str, Any]] = []
-                for u in (src_prop.get("people", []) or []):
-                    people_items.append({"id": u.get("id"), "name": u.get("name")})
-
-                q_count = len([x for x in people_items if x.get("id") or x.get("name")])
-                if q_count == 0 and participants_prop_id:
-                    try:
-                        people_items = fetch_people_property_item(origem_page_id, participants_prop_id)
-                    except Exception:
-                        people_items = []
-
-                texto = make_participants_text(
-                    people_items=people_items,
-                    mode=tcfg.get("people_public_mode", "names_or_count"),
-                    sep=tcfg.get("separator", ", "),
-                    fallback_mode=tcfg.get("fallback_mode", "count"),
-                    singular=tcfg.get("label_singular", "participante"),
-                    plural=tcfg.get("label_plural", "participantes"),
-                )
-                props_out[target_prop] = {"rich_text": to_rich_text(texto)}
-
-        # resolve mirror_id
-        mirror_id = idx.get(origem_page_id)
-        if not mirror_id:
-            mirror_id = find_mirror_by_relation(espelho_db, rel_prop, origem_page_id)
-            if mirror_id:
-                idx[origem_page_id] = mirror_id
-                _save_json(INDEX_FILE, index)
-
-        try:
-            if mirror_id:
-                try:
-                    notion_patch(
-                        f"/pages/{mirror_id}",
-                        {"properties": props_out},
-                        context=f"Update espelho ({cfg['name']}) espelho_id={mirror_id}",
-                    )
-                    updated += 1
-                except Exception as e:
-                    if is_archived_edit_error(e):
-                        # ✅ agora você quer editar: desarquiva e tenta de novo
-                        notion_patch(
-                            f"/pages/{mirror_id}",
-                            {"archived": False},
-                            context=f"Unarchive espelho ({cfg['name']}) espelho_id={mirror_id}",
-                        )
-                        unarchived += 1
-                        notion_patch(
-                            f"/pages/{mirror_id}",
-                            {"properties": props_out},
-                            context=f"Update espelho (retry) ({cfg['name']}) espelho_id={mirror_id}",
-                        )
-                        updated += 1
-                    else:
-                        failed_other += 1
-                        if not MIRROR_QUIET_ITEM_ERRORS:
-                            print(f"⚠️ [{cfg['name']}] Falha update espelho_id={mirror_id} origem_id={origem_page_id}: {notion_error_message(e)}")
-            else:
-                if force_full and MIRROR_FULL_SYNC_UPDATE_ONLY:
-                    skipped_create += 1
-                else:
-                    created_page = notion_post(
-                        "/pages",
-                        {"parent": {"database_id": espelho_db}, "properties": props_out},
-                        context=f"Create espelho ({cfg['name']}) origem_id={origem_page_id}",
-                    )
-                    idx[origem_page_id] = created_page["id"]
-                    created += 1
-                    _save_json(INDEX_FILE, index)
-
-        except Exception as e:
-            failed_other += 1
-            if not MIRROR_QUIET_ITEM_ERRORS:
-                print(f"⚠️ [{cfg['name']}] Falha ao sincronizar origem_id={origem_page_id}: {notion_error_message(e)}")
-
-        processed += 1
-        if processed % SAVE_EVERY_N == 0:
-            if (not force_full) and newest_edited:
-                mirror_state["last_sync_time"] = newest_edited
-                state[k] = mirror_state
-                _save_json(STATE_FILE, state)
-            elif force_full and MIRROR_FULL_SYNC_UPDATE_CHECKPOINT and newest_edited:
-                mirror_state["last_sync_time"] = newest_edited
-                state[k] = mirror_state
-                _save_json(STATE_FILE, state)
-
-            _save_json(INDEX_FILE, index)
-
-    # salva no final
-    if newest_edited:
-        if (not force_full):
-            mirror_state["last_sync_time"] = newest_edited
-            state[k] = mirror_state
-            _save_json(STATE_FILE, state)
-        elif force_full and MIRROR_FULL_SYNC_UPDATE_CHECKPOINT:
-            mirror_state["last_sync_time"] = newest_edited
-            state[k] = mirror_state
-            _save_json(STATE_FILE, state)
-
-        _save_json(INDEX_FILE, index)
-
-    if force_full and (not MIRROR_FULL_SYNC_UPDATE_CHECKPOINT):
-        print(f"ℹ️ [{cfg['name']}] FULL: não atualizei last_sync_time (por padrão). Use MIRROR_FULL_SYNC_UPDATE_CHECKPOINT=1 se quiser.")
-
-    print(
-        f"✅ [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} "
-        f"| Criados={created} | Atualizados={updated} | Unarchived={unarchived} "
-        f"| SkippedCreate={skipped_create} | FalhasOutras={failed_other} "
-        f"| last_sync_time={state.get(k, {}).get('last_sync_time')}"
+    pages = query_database_pages(
+        db_id=source_db_id,
+        date_property_name=date_property_name,
+        date_from=date_from,
+        incremental_after=incremental_after,
+        sorts=sorts,
     )
 
-# =============================
-# Cleanup orphans
-# =============================
-def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any]) -> None:
-    if not cfg.get("cleanup_orphans"):
-        return
+    print(
+        f"🔄 [{name}] mode={'DRY_RUN' if MIRROR_DRY_RUN else ('FULL' if MIRROR_FORCE_FULL_SYNC or not MIRROR_INCREMENTAL else 'INCR')}"
+        f" | origem_itens={len(pages)} | from={date_from} | date_prop={date_property_name or 'N/A'}"
+    )
 
-    origem_db = os.getenv(cfg["env_origem"])
-    espelho_db = os.getenv(cfg["env_espelho"])
-    if not origem_db or not espelho_db:
-        return
+    # aplica limite (modo teste)
+    if MIRROR_LIMIT and MIRROR_LIMIT > 0:
+        pages = pages[:MIRROR_LIMIT]
+        print(f"🧪 [{name}] MIRROR_LIMIT ativo: processando somente {len(pages)} itens")
 
-    k = mirror_key(cfg, origem_db, espelho_db)
-    mirror_state = state.get(k, {})
-    last_cleanup = _parse_iso(mirror_state.get("last_cleanup_time"))
+    created = 0
+    updated = 0
+    skipped_archived = 0
+    errors = 0
 
-    if last_cleanup and datetime.now(timezone.utc) - last_cleanup < timedelta(hours=CLEANUP_EVERY_HOURS):
-        return
+    # só pra mostrar amostra no dry-run
+    sample_titles: List[str] = []
 
-    print(f"🧹 [{cfg['name']}] Rodando cleanup de órfãos...")
+    for i, page in enumerate(pages, start=1):
+        source_id = page["id"]
 
-    origin_pages = query_all(origem_db, {"page_size": 100}, context=f"Load all origin ids ({cfg['name']})")
-    origin_ids = {p["id"] for p in origin_pages}
+        if is_archived(page) and not MIRROR_UPDATE_ARCHIVED:
+            skipped_archived += 1
+            continue
 
-    rel_prop = cfg["relation_prop_espelho"]
-    cursor = None
-    checked = 0
-    archived = 0
+        try:
+            props = build_dest_properties(page, include_only_props=include_only_props)
 
-    while True:
-        payload = {"page_size": 100}
-        if cursor:
-            payload["start_cursor"] = cursor
-
-        data = query_database(espelho_db, payload, context=f"Query espelho cleanup ({cfg['name']})")
-        items = data.get("results", [])
-        cursor = data.get("next_cursor") if data.get("has_more") else None
-
-        for m in items:
-            rel = m.get("properties", {}).get(rel_prop)
-            rel_list = (rel or {}).get("relation", []) or []
-            if not rel_list:
-                checked += 1
-                continue
-            oid = rel_list[0].get("id")
-            if oid and oid not in origin_ids:
+            # captura título se existir (apenas para log em dry-run)
+            if MIRROR_DRY_RUN and "Título" in (props.keys()):
                 try:
-                    notion_patch(
-                        f"/pages/{m['id']}",
-                        {"archived": True},
-                        context=f"Archive orphan ({cfg['name']}) espelho_id={m['id']}",
-                    )
-                    archived += 1
+                    title_prop = page["properties"].get("Título")
+                    if title_prop and title_prop.get("type") == "title":
+                        t = "".join([p.get("plain_text", "") for p in title_prop.get("title", [])]).strip()
+                        if t:
+                            sample_titles.append(t)
                 except Exception:
                     pass
-            checked += 1
-            if checked % 80 == 0:
-                time.sleep(1.5)
 
-        if not cursor:
-            break
+            if MIRROR_DRY_RUN:
+                # não grava e não altera estado
+                continue
 
-    mirror_state["last_cleanup_time"] = _now_iso()
-    state[k] = mirror_state
-    _save_json(STATE_FILE, state)
+            if source_id in mappings:
+                update_page_in_mirror(mappings[source_id], props)
+                updated += 1
+            else:
+                mirror_id = create_page_in_mirror(mirror_db_id, props)
+                mappings[source_id] = mirror_id
+                created += 1
 
-    idx = index.get(k, {})
-    to_del = [oid for oid in idx.keys() if oid not in origin_ids]
-    for oid in to_del:
-        del idx[oid]
-    index[k] = idx
-    _save_json(INDEX_FILE, index)
+            if i % 25 == 0:
+                state["mappings"] = mappings
+                save_state(name, state)
+                print(f"  ... [{name}] {i}/{len(pages)} (Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors})")
 
-    print(f"🧹 [{cfg['name']}] Cleanup | Verificados={checked} | Arquivados={archived} | Index removidos={len(to_del)}")
+            time.sleep(SLEEP_SEC)
 
-def main():
-    if not NOTION_API_KEY:
-        raise RuntimeError("Faltando NOTION_API_KEY.")
+        except Exception as e:
+            errors += 1
+            print(f"❌ [{name}] erro {i}/{len(pages)} source_id={source_id}: {e}")
 
-    print(f"[cfg] MIRROR_FORCE_FULL_SYNC raw={os.getenv('MIRROR_FORCE_FULL_SYNC')} parsed={MIRROR_FORCE_FULL_SYNC}")
-    print(f"[cfg] MIRROR_FULL_SYNC_UPDATE_ONLY raw={os.getenv('MIRROR_FULL_SYNC_UPDATE_ONLY')} parsed={MIRROR_FULL_SYNC_UPDATE_ONLY}")
-    print(f"[cfg] MIRROR_FULL_SYNC_UPDATE_CHECKPOINT raw={os.getenv('MIRROR_FULL_SYNC_UPDATE_CHECKPOINT')} parsed={MIRROR_FULL_SYNC_UPDATE_CHECKPOINT}")
-    print(f"[cfg] MIRROR_QUIET_ITEM_ERRORS raw={os.getenv('MIRROR_QUIET_ITEM_ERRORS')} parsed={MIRROR_QUIET_ITEM_ERRORS}")
+    # se foi dry-run, só reporta e sai
+    if MIRROR_DRY_RUN:
+        print(f"✅ [{name}] DRY_RUN finalizado | Itens analisados={len(pages)} | SkippedArchived={skipped_archived} | Erros={errors}")
+        if sample_titles:
+            print("   Amostra de títulos (até 10):")
+            for t in sample_titles[:10]:
+                print(f"   - {t}")
+        return
 
-    state = _load_json(STATE_FILE, {})
-    index = _load_json(INDEX_FILE, {})
+    # checkpoint final
+    state["mappings"] = mappings
+    if MIRROR_INCREMENTAL and not MIRROR_FORCE_FULL_SYNC:
+        state["last_sync_time"] = now_iso_z()
+    save_state(name, state)
 
-    for cfg in MIRRORS:
-        sync(cfg, state, index, force_full=MIRROR_FORCE_FULL_SYNC)
+    print(f"✅ [{name}] concluído | Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors}")
 
-        # evita “briga” durante full sync
-        if not MIRROR_FORCE_FULL_SYNC:
-            cleanup_orphans(cfg, state, index)
-        else:
-            print(f"ℹ️ [{cfg['name']}] FULL: pulando cleanup_orphans nesta execução.")
+
+def require_env(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"Faltou {name} no env.")
+    return v
+
+
+def main() -> None:
+    require_env("NOTION_API_KEY")
+
+    # -------------------------
+    # REUNIÕES (mantido no código, mas só roda se RUN_REUNIOES=1)
+    # -------------------------
+    if RUN_REUNIOES:
+        DATABASE_ID_REUNIOES = require_env("DATABASE_ID_REUNIOES")
+        DATABASE_ID_REUNIOES_ESPELHO = require_env("DATABASE_ID_REUNIOES_ESPELHO")
+        REUNIOES_DATE_PROP = os.getenv("REUNIOES_DATE_PROP", "Data")
+
+        mirror_database(
+            name="Reuniões",
+            source_db_id=DATABASE_ID_REUNIOES,
+            mirror_db_id=DATABASE_ID_REUNIOES_ESPELHO,
+            include_only_props=None,           # copia tudo que for gravável
+            date_property_name=REUNIOES_DATE_PROP,
+            date_from=DATE_FROM,
+            sort_by_date=True,
+        )
+    else:
+        print("⏭️ [Reuniões] Ignorado (RUN_REUNIOES=0)")
+
+    # -------------------------
+    # YOUTUBE (default: roda)
+    # -------------------------
+    if RUN_YOUTUBE:
+        DATABASE_ID_YOUTUBE = require_env("DATABASE_ID_YOUTUBE")
+        DATABASE_ID_YOUTUBE_ESPELHO = require_env("DATABASE_ID_YOUTUBE_ESPELHO")
+
+        mirror_database(
+            name="YouTube",
+            source_db_id=DATABASE_ID_YOUTUBE,
+            mirror_db_id=DATABASE_ID_YOUTUBE_ESPELHO,
+            include_only_props=["Título", "Veiculação - YouTube", "Status - YouTube"],
+            date_property_name="Veiculação - YouTube",
+            date_from=DATE_FROM,
+            sort_by_date=True,
+        )
+    else:
+        print("⏭️ [YouTube] Ignorado (RUN_YOUTUBE=0)")
+
 
 if __name__ == "__main__":
     main()
