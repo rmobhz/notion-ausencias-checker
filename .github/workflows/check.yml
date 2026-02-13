@@ -55,26 +55,26 @@ jobs:
           DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
 
       # ✅ Espelho: SOMENTE YOUTUBE (20 registros)
-      - name: Sincronizar espelho do YouTube (teste)
-        if: always()
-        run: |
+      # - name: Sincronizar espelho do YouTube (teste)
+        # if: always()
+        # run: |
           # echo "▶️ Sincronizando espelho do YouTube (modo teste)..."
           # python sync_espelho.py
-        env:
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        # env:
+          # NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
 
           # IDs do YouTube
-          DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_YOUTUBE }}
-          DATABASE_ID_YOUTUBE_ESPELHO: ${{ secrets.DATABASE_ID_YOUTUBE_ESPELHO }}
+          # DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_YOUTUBE }}
+          # DATABASE_ID_YOUTUBE_ESPELHO: ${{ secrets.DATABASE_ID_YOUTUBE_ESPELHO }}
 
           # IDs de reuniões podem ficar, mas NÃO serão usados
-          DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
-          DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
+          # DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
+          # DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
 
           # ✅ CONTROLES
-          RUN_REUNIOES: "0"
-          RUN_YOUTUBE: "1"
-          MIRROR_LIMIT: "20"
+          # RUN_REUNIOES: "0"
+          # RUN_YOUTUBE: "1"
+          # MIRROR_LIMIT: "20"
 
           # (opcional – ultra seguro)
           # MIRROR_DRY_RUN: "1"
@@ -85,9 +85,9 @@ jobs:
           # MIRROR_SLEEP_MS: "150"
 
       # ✅ SAVE do estado (.state)
-      - name: Salvar estado (.state)
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .state
-          key: gcmd-state-${{ github.run_number }}
+      # - name: Salvar estado (.state)
+        # if: always()
+        # uses: actions/cache/save@v4
+        # with:
+          # path: .state
+          # key: gcmd-state-${{ github.run_number }}
