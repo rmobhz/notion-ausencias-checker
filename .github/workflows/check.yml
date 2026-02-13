@@ -65,6 +65,8 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
           DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
+          DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_YOUTUBE }}
+          DATABASE_ID_YOUTUBE_ESPELHO: ${{ secrets.DATABASE_ID_YOUTUBE_ESPELHO }}
           # opcionais (se quiser controlar sem editar o script):
           # MIRROR_BASE_SLEEP: "0.2"
           # MIRROR_MAX_RETRIES: "10"
