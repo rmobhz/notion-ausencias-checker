@@ -37,14 +37,14 @@ jobs:
 
       - name: Executar scripts de verificação e automação (não espelho)
         run: |
-          # echo "▶️ Verificando conflitos entre reuniões e ausências..."
-          # python notion_check.py
-          # echo "▶️ Verificando conflitos de sala GCMD..."
-          # python check_gcmd_room_conflicts.py
-          # echo "▶️ Verificando calendário editorial..."
-          # python notion_check_calendario.py
-          # echo "▶️ Criando reuniões recorrentes..."
-          # python create_recurring_meetings.py
+          echo "▶️ Verificando conflitos entre reuniões e ausências..."
+          python notion_check.py
+          echo "▶️ Verificando conflitos de sala GCMD..."
+          python check_gcmd_room_conflicts.py
+          echo "▶️ Verificando calendário editorial..."
+          python notion_check_calendario.py
+          echo "▶️ Criando reuniões recorrentes..."
+          python create_recurring_meetings.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
@@ -58,8 +58,8 @@ jobs:
       - name: Sincronizar espelho do YouTube (teste)
         if: always()
         run: |
-          echo "▶️ Sincronizando espelho do YouTube (modo teste)..."
-          python sync_espelho.py
+          # echo "▶️ Sincronizando espelho do YouTube (modo teste)..."
+          # python sync_espelho.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
 
