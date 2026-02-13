@@ -41,7 +41,7 @@ MIRRORS = [
         "transforms": {
             "Participantes": {
                 "mode": "people_to_public_text",
-                "target_prop": "Participantes (público)",
+                "target_prop": "Participantes",
                 "people_public_mode": "count",  # privacidade + robustez
                 "label_singular": "participante",
                 "label_plural": "participantes",
