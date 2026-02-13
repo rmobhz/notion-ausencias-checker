@@ -36,6 +36,9 @@ MIRROR_FULL_SYNC_UPDATE_ONLY = env_bool("MIRROR_FULL_SYNC_UPDATE_ONLY", False)
 # opcional: em full sync, também atualiza last_sync_time ao final (padrão: não)
 MIRROR_FULL_SYNC_UPDATE_CHECKPOINT = env_bool("MIRROR_FULL_SYNC_UPDATE_CHECKPOINT", False)
 
+# ✅ reduz log de erros repetitivos no loop
+MIRROR_QUIET_ITEM_ERRORS = env_bool("MIRROR_QUIET_ITEM_ERRORS", True)
+
 MIRRORS = [
     {
         "name": "Reuniões",
@@ -46,17 +49,14 @@ MIRRORS = [
         "title_prop_origem": "Evento",
         "title_prop_espelho": "Evento",
 
-        # fácil editar
         "copy_props": ["Data", "Local", "Status"],
 
-        # Participantes agora é o MESMO nome no espelho, e você quer nomes
         "transforms": {
             "Participantes": {
                 "mode": "people_to_public_text",
                 "target_prop": "Participantes",
-                "people_public_mode": "names",   # <— nomes separados por vírgula
+                "people_public_mode": "names",
                 "separator": ", ",
-                # fallback caso não consiga nome (ex. guest sem permissão)
                 "fallback_mode": "count",
                 "label_singular": "participante",
                 "label_plural": "participantes",
@@ -142,15 +142,11 @@ def request_with_retry_url(method: str, url: str, payload: Optional[Dict[str, An
 
         if not r.ok:
             details = _parse_json_safe(r)
-            print("\n❌ ERRO Notion API")
-            print(f"Contexto: {context}")
-            print(f"Status: {r.status_code}")
-            if payload is not None:
-                print("Payload:")
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            print("Detalhes:")
-            print(json.dumps(details, ensure_ascii=False, indent=2))
-            r.raise_for_status()
+            # levanta erro mas com contexto; loop decide se loga muito ou pouco
+            err = requests.HTTPError(f"{r.status_code} Client Error: {details.get('message','')}")
+            err.response = r
+            err._notion_details = details  # type: ignore[attr-defined]
+            raise err
 
         time.sleep(BASE_SLEEP)
         return r.json()
@@ -169,6 +165,26 @@ def notion_post(path: str, payload: Dict[str, Any], context: str) -> Dict[str, A
 
 def notion_patch(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
     return request_with_retry("PATCH", path, payload, context=context)
+
+def notion_error_message(e: Exception) -> str:
+    if isinstance(e, requests.HTTPError):
+        try:
+            details = getattr(e, "_notion_details", None)
+            if isinstance(details, dict) and details.get("message"):
+                return str(details.get("message"))
+        except Exception:
+            pass
+        try:
+            if e.response is not None:
+                d = e.response.json()
+                return str(d.get("message") or "")
+        except Exception:
+            pass
+    return str(e)
+
+def is_archived_edit_error(e: Exception) -> bool:
+    msg = notion_error_message(e).lower()
+    return "archived" in msg and "can't edit" in msg
 
 # =============================
 # Notion helpers
@@ -263,7 +279,6 @@ def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any
 
     for _ in range(1000):
         data = request_with_retry_url("GET", url, None, context=f"Get page property item (people) page={page_id}")
-
         results = data.get("results", []) or []
         for it in results:
             uid = it.get("id")
@@ -273,7 +288,6 @@ def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any
 
         if not data.get("has_more"):
             break
-
         next_url = data.get("next_url")
         if not next_url:
             break
@@ -315,10 +329,7 @@ def make_participants_text(
 def find_mirror_by_relation(espelho_db: str, rel_prop: str, origem_page_id: str) -> Optional[str]:
     payload = {
         "page_size": 1,
-        "filter": {
-            "property": rel_prop,
-            "relation": {"contains": origem_page_id}
-        }
+        "filter": {"property": rel_prop, "relation": {"contains": origem_page_id}}
     }
     data = query_database(espelho_db, payload, context=f"Lookup espelho by relation origem_id={origem_page_id}")
     results = data.get("results", []) or []
@@ -362,9 +373,7 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
     if "Participantes" in transforms:
         participants_prop_id = get_property_id_from_schema(origem_schema, "Participantes")
 
-    # -------------------------
     # Query origem (full ou incremental)
-    # -------------------------
     filter_obj = None
     if (not force_full) and last_sync_dt:
         filter_obj = {"timestamp": "last_edited_time", "last_edited_time": {"after": last_sync_dt.isoformat()}}
@@ -397,6 +406,8 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
     created = 0
     updated = 0
     skipped_create = 0
+    skipped_archived = 0
+    failed_other = 0
 
     processed = 0
     newest_edited: Optional[str] = None
@@ -414,7 +425,7 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
             title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
         }
 
-        # copy props 1:1 (com sanitização de rich_text)
+        # copy props
         for prop_name in cfg.get("copy_props", []):
             if prop_name not in origem_props_types or prop_name not in espelho_props:
                 continue
@@ -466,7 +477,7 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
                 )
                 props_out[target_prop] = {"rich_text": to_rich_text(texto)}
 
-        # anti-dup: resolve mirror_id pelo índice; se não tiver, procura no espelho
+        # resolve mirror_id
         mirror_id = idx.get(origem_page_id)
         if not mirror_id:
             mirror_id = find_mirror_by_relation(espelho_db, rel_prop, origem_page_id)
@@ -476,12 +487,22 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
 
         try:
             if mirror_id:
-                notion_patch(
-                    f"/pages/{mirror_id}",
-                    {"properties": props_out},
-                    context=f"Update espelho ({cfg['name']}) espelho_id={mirror_id}",
-                )
-                updated += 1
+                try:
+                    notion_patch(
+                        f"/pages/{mirror_id}",
+                        {"properties": props_out},
+                        context=f"Update espelho ({cfg['name']}) espelho_id={mirror_id}",
+                    )
+                    updated += 1
+                except Exception as e:
+                    # ✅ regra do Rafael: não desarquiva; apenas pula updates em arquivados
+                    if is_archived_edit_error(e):
+                        skipped_archived += 1
+                    else:
+                        failed_other += 1
+                        if not MIRROR_QUIET_ITEM_ERRORS:
+                            print(f"⚠️ [{cfg['name']}] Falha update (não-archived) espelho_id={mirror_id} origem_id={origem_page_id}: {notion_error_message(e)}")
+                # segue
             else:
                 if force_full and MIRROR_FULL_SYNC_UPDATE_ONLY:
                     skipped_create += 1
@@ -496,12 +517,13 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
                     _save_json(INDEX_FILE, index)
 
         except Exception as e:
-            print(f"⚠️ [{cfg['name']}] Falha ao sincronizar origem_id={origem_page_id}. Pulando item. Erro: {e}")
-            continue
+            failed_other += 1
+            if not MIRROR_QUIET_ITEM_ERRORS:
+                print(f"⚠️ [{cfg['name']}] Falha ao sincronizar origem_id={origem_page_id}: {notion_error_message(e)}")
 
         processed += 1
         if processed % SAVE_EVERY_N == 0:
-            # salva progresso parcial no incremental (full, só se você pedir)
+            # checkpoint só no incremental (full só se você pedir)
             if (not force_full) and newest_edited:
                 mirror_state["last_sync_time"] = newest_edited
                 state[k] = mirror_state
@@ -523,13 +545,17 @@ def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], forc
             mirror_state["last_sync_time"] = newest_edited
             state[k] = mirror_state
             _save_json(STATE_FILE, state)
-
         _save_json(INDEX_FILE, index)
 
     if force_full and (not MIRROR_FULL_SYNC_UPDATE_CHECKPOINT):
         print(f"ℹ️ [{cfg['name']}] FULL: não atualizei last_sync_time (por padrão). Use MIRROR_FULL_SYNC_UPDATE_CHECKPOINT=1 se quiser.")
 
-    print(f"✅ [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} | Criados={created} | Atualizados={updated} | SkippedCreate={skipped_create} | last_sync_time={state.get(k, {}).get('last_sync_time')}")
+    print(
+        f"✅ [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} "
+        f"| Criados={created} | Atualizados={updated} "
+        f"| SkippedCreate={skipped_create} | SkippedArchivedUpdates={skipped_archived} "
+        f"| FalhasOutras={failed_other} | last_sync_time={state.get(k, {}).get('last_sync_time')}"
+    )
 
 # =============================
 # Cleanup orphans
@@ -577,12 +603,16 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
                 continue
             oid = rel_list[0].get("id")
             if oid and oid not in origin_ids:
-                notion_patch(
-                    f"/pages/{m['id']}",
-                    {"archived": True},
-                    context=f"Archive orphan ({cfg['name']}) espelho_id={m['id']}",
-                )
-                archived += 1
+                # arquiva órfãos
+                try:
+                    notion_patch(
+                        f"/pages/{m['id']}",
+                        {"archived": True},
+                        context=f"Archive orphan ({cfg['name']}) espelho_id={m['id']}",
+                    )
+                    archived += 1
+                except Exception:
+                    pass
             checked += 1
             if checked % 80 == 0:
                 time.sleep(1.5)
@@ -611,13 +641,19 @@ def main():
     print(f"[cfg] MIRROR_FORCE_FULL_SYNC raw={os.getenv('MIRROR_FORCE_FULL_SYNC')} parsed={MIRROR_FORCE_FULL_SYNC}")
     print(f"[cfg] MIRROR_FULL_SYNC_UPDATE_ONLY raw={os.getenv('MIRROR_FULL_SYNC_UPDATE_ONLY')} parsed={MIRROR_FULL_SYNC_UPDATE_ONLY}")
     print(f"[cfg] MIRROR_FULL_SYNC_UPDATE_CHECKPOINT raw={os.getenv('MIRROR_FULL_SYNC_UPDATE_CHECKPOINT')} parsed={MIRROR_FULL_SYNC_UPDATE_CHECKPOINT}")
+    print(f"[cfg] MIRROR_QUIET_ITEM_ERRORS raw={os.getenv('MIRROR_QUIET_ITEM_ERRORS')} parsed={MIRROR_QUIET_ITEM_ERRORS}")
 
     state = _load_json(STATE_FILE, {})
     index = _load_json(INDEX_FILE, {})
 
     for cfg in MIRRORS:
         sync(cfg, state, index, force_full=MIRROR_FORCE_FULL_SYNC)
-        cleanup_orphans(cfg, state, index)
+
+        # ✅ evita “briga” durante full sync
+        if not MIRROR_FORCE_FULL_SYNC:
+            cleanup_orphans(cfg, state, index)
+        else:
+            print(f"ℹ️ [{cfg['name']}] FULL: pulando cleanup_orphans nesta execução.")
 
 if __name__ == "__main__":
     main()
