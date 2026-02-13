@@ -1,6 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+sync_espelho.py — Um único script para espelhar múltiplas bases no Notion
+
+✅ O que este script faz
+- Roda ESPÉLHOS de:
+  - Reuniões (opcional)
+  - YouTube (opcional)
+- Permite escolher o que executar via ENV:
+  RUN_REUNIOES=0/1
+  RUN_YOUTUBE=0/1
+- Permite "modo teste" sem escrever nada:
+  MIRROR_DRY_RUN=1
+- Permite limitar quantidade de registros processados:
+  MIRROR_LIMIT=20
+- Filtra itens a partir de 2026 (>= 2026-01-01) para as bases que tiverem date_property_name configurado
+
+✅ Correção do seu erro atual
+- Se você passar um ID que é "page" (página que contém a base), o script tenta resolver automaticamente
+  o database_id real procurando um bloco child_database dentro da página.
+  Isso evita o erro: "Provided ID ... is a page, not a database".
+
+ENV obrigatórias
+  NOTION_API_KEY
+
+ENV do YouTube
+  DATABASE_ID_YOUTUBE            (pode ser DB ID ou PAGE ID)
+  DATABASE_ID_YOUTUBE_ESPELHO    (pode ser DB ID ou PAGE ID)
+
+ENV de Reuniões (se RUN_REUNIOES=1)
+  DATABASE_ID_REUNIOES
+  DATABASE_ID_REUNIOES_ESPELHO
+  REUNIOES_DATE_PROP   (opcional, default "Data")
+
+Flags (opcionais)
+  RUN_REUNIOES=0/1          (default 0)
+  RUN_YOUTUBE=0/1           (default 1)
+  MIRROR_DRY_RUN=0/1        (default 0)
+  MIRROR_LIMIT=N            (default 0 = sem limite)
+  MIRROR_FORCE_FULL_SYNC=1  (default 1)
+  MIRROR_INCREMENTAL=0/1    (default 0)  # usa last_sync_time do estado
+  MIRROR_UPDATE_ARCHIVED=1  (default 1)
+  MIRROR_SLEEP_MS=150       (default 150)
+
+Observação
+- O script usa estado local em .state/ para mapear:
+    source_page_id -> mirror_page_id
+  evitando duplicações.
+"""
+
 import os
 import json
 import time
@@ -8,7 +57,7 @@ import requests
 from typing import Any, Dict, List, Optional
 
 # =========================
-# ENV / CONFIG
+# CONFIG
 # =========================
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_VERSION = "2022-06-28"
@@ -21,8 +70,8 @@ RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
 
 # Segurança / teste
-MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"     # se 1, não cria/atualiza
-MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())           # 0 = sem limite; >0 limita itens processados
+MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"   # se 1, não cria/atualiza
+MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())         # 0 = sem limite; >0 limita itens
 
 # Execução
 MIRROR_FORCE_FULL_SYNC = os.getenv("MIRROR_FORCE_FULL_SYNC", "1").strip() == "1"
@@ -32,7 +81,7 @@ MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
 MIRROR_SLEEP_MS = int(os.getenv("MIRROR_SLEEP_MS", "150").strip())
 SLEEP_SEC = max(0, MIRROR_SLEEP_MS) / 1000.0
 
-# Janela: a partir de 2026
+# A partir de 2026
 DATE_FROM = "2026-01-01"
 
 
@@ -49,6 +98,13 @@ def notion_headers() -> Dict[str, str]:
     }
 
 
+def http_get(url: str) -> Dict[str, Any]:
+    r = requests.get(url, headers=notion_headers(), timeout=60)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} GET {url}\n{r.text}")
+    return r.json()
+
+
 def http_post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     r = requests.post(url, headers=notion_headers(), json=payload, timeout=60)
     if r.status_code >= 400:
@@ -61,6 +117,56 @@ def http_patch(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if r.status_code >= 400:
         raise RuntimeError(f"HTTP {r.status_code} PATCH {url}\n{r.text}")
     return r.json()
+
+
+# =========================
+# Resolver DB ID a partir de PAGE ID (child_database)
+# =========================
+def resolve_child_database_from_page(page_id: str) -> str:
+    """
+    Busca um bloco child_database dentro de uma página e retorna o ID do database.
+    Pagina o endpoint /blocks/{id}/children.
+    """
+    start_cursor: Optional[str] = None
+    while True:
+        url = f"{BASE_URL}/blocks/{page_id}/children?page_size=100"
+        if start_cursor:
+            url += f"&start_cursor={start_cursor}"
+
+        data = http_get(url)
+        for b in data.get("results", []):
+            if b.get("type") == "child_database":
+                return b["id"]
+
+        if data.get("has_more"):
+            start_cursor = data.get("next_cursor")
+            time.sleep(SLEEP_SEC)
+        else:
+            break
+
+    raise RuntimeError(
+        f"O ID {page_id} parece ser uma página, mas não encontrei nenhum child_database dentro dela. "
+        f"Dica: abra a base e use 'Open as page' + Copy link para obter o database_id."
+    )
+
+
+def resolve_database_id(maybe_db_or_page_id: str, label: str) -> str:
+    """
+    Aceita DB ID ou PAGE ID.
+    - Tenta primeiro GET /databases/{id}. Se der certo, é DB.
+    - Se falhar, tenta resolver como page -> child_database.
+    """
+    # 1) tenta como database
+    try:
+        _ = http_get(f"{BASE_URL}/databases/{maybe_db_or_page_id}")
+        return maybe_db_or_page_id
+    except Exception:
+        pass
+
+    # 2) tenta como page contendo child_database
+    db_id = resolve_child_database_from_page(maybe_db_or_page_id)
+    print(f"ℹ️ [{label}] ID informado era PAGE; resolvido para DATABASE: {db_id}")
+    return db_id
 
 
 # =========================
@@ -109,6 +215,10 @@ def is_archived(page: Dict[str, Any]) -> bool:
 
 
 def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Converte uma propriedade da API (origem) para payload de escrita (destino).
+    Retorna None para tipos não graváveis.
+    """
     if not prop:
         return None
     t = prop.get("type")
@@ -269,7 +379,7 @@ def mirror_database(
         f" | origem_itens={len(pages)} | from={date_from} | date_prop={date_property_name or 'N/A'}"
     )
 
-    # aplica limite (modo teste)
+    # limita itens (modo teste)
     if MIRROR_LIMIT and MIRROR_LIMIT > 0:
         pages = pages[:MIRROR_LIMIT]
         print(f"🧪 [{name}] MIRROR_LIMIT ativo: processando somente {len(pages)} itens")
@@ -278,9 +388,6 @@ def mirror_database(
     updated = 0
     skipped_archived = 0
     errors = 0
-
-    # só pra mostrar amostra no dry-run
-    sample_titles: List[str] = []
 
     for i, page in enumerate(pages, start=1):
         source_id = page["id"]
@@ -292,20 +399,8 @@ def mirror_database(
         try:
             props = build_dest_properties(page, include_only_props=include_only_props)
 
-            # captura título se existir (apenas para log em dry-run)
-            if MIRROR_DRY_RUN and "Título" in (props.keys()):
-                try:
-                    title_prop = page["properties"].get("Título")
-                    if title_prop and title_prop.get("type") == "title":
-                        t = "".join([p.get("plain_text", "") for p in title_prop.get("title", [])]).strip()
-                        if t:
-                            sample_titles.append(t)
-                except Exception:
-                    pass
-
             if MIRROR_DRY_RUN:
-                # não grava e não altera estado
-                continue
+                continue  # não grava nem altera estado
 
             if source_id in mappings:
                 update_page_in_mirror(mappings[source_id], props)
@@ -318,7 +413,10 @@ def mirror_database(
             if i % 25 == 0:
                 state["mappings"] = mappings
                 save_state(name, state)
-                print(f"  ... [{name}] {i}/{len(pages)} (Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors})")
+                print(
+                    f"  ... [{name}] {i}/{len(pages)} "
+                    f"(Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors})"
+                )
 
             time.sleep(SLEEP_SEC)
 
@@ -326,13 +424,8 @@ def mirror_database(
             errors += 1
             print(f"❌ [{name}] erro {i}/{len(pages)} source_id={source_id}: {e}")
 
-    # se foi dry-run, só reporta e sai
     if MIRROR_DRY_RUN:
         print(f"✅ [{name}] DRY_RUN finalizado | Itens analisados={len(pages)} | SkippedArchived={skipped_archived} | Erros={errors}")
-        if sample_titles:
-            print("   Amostra de títulos (até 10):")
-            for t in sample_titles[:10]:
-                print(f"   - {t}")
         return
 
     # checkpoint final
@@ -344,6 +437,9 @@ def mirror_database(
     print(f"✅ [{name}] concluído | Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors}")
 
 
+# =========================
+# MAIN
+# =========================
 def require_env(name: str) -> str:
     v = os.getenv(name)
     if not v:
@@ -355,18 +451,22 @@ def main() -> None:
     require_env("NOTION_API_KEY")
 
     # -------------------------
-    # REUNIÕES (mantido no código, mas só roda se RUN_REUNIOES=1)
+    # REUNIÕES (mantido, mas só roda se RUN_REUNIOES=1)
     # -------------------------
     if RUN_REUNIOES:
-        DATABASE_ID_REUNIOES = require_env("DATABASE_ID_REUNIOES")
-        DATABASE_ID_REUNIOES_ESPELHO = require_env("DATABASE_ID_REUNIOES_ESPELHO")
+        src = require_env("DATABASE_ID_REUNIOES")
+        dst = require_env("DATABASE_ID_REUNIOES_ESPELHO")
         REUNIOES_DATE_PROP = os.getenv("REUNIOES_DATE_PROP", "Data")
+
+        # Resolve IDs caso alguém tenha passado PAGE ID
+        src = resolve_database_id(src, "Reuniões/origem")
+        dst = resolve_database_id(dst, "Reuniões/espelho")
 
         mirror_database(
             name="Reuniões",
-            source_db_id=DATABASE_ID_REUNIOES,
-            mirror_db_id=DATABASE_ID_REUNIOES_ESPELHO,
-            include_only_props=None,           # copia tudo que for gravável
+            source_db_id=src,
+            mirror_db_id=dst,
+            include_only_props=None,  # copia tudo que for gravável
             date_property_name=REUNIOES_DATE_PROP,
             date_from=DATE_FROM,
             sort_by_date=True,
@@ -378,13 +478,17 @@ def main() -> None:
     # YOUTUBE (default: roda)
     # -------------------------
     if RUN_YOUTUBE:
-        DATABASE_ID_YOUTUBE = require_env("DATABASE_ID_YOUTUBE")
-        DATABASE_ID_YOUTUBE_ESPELHO = require_env("DATABASE_ID_YOUTUBE_ESPELHO")
+        src = require_env("DATABASE_ID_YOUTUBE")
+        dst = require_env("DATABASE_ID_YOUTUBE_ESPELHO")
+
+        # Resolve IDs caso tenham vindo como PAGE ID
+        src = resolve_database_id(src, "YouTube/origem")
+        dst = resolve_database_id(dst, "YouTube/espelho")
 
         mirror_database(
             name="YouTube",
-            source_db_id=DATABASE_ID_YOUTUBE,
-            mirror_db_id=DATABASE_ID_YOUTUBE_ESPELHO,
+            source_db_id=src,
+            mirror_db_id=dst,
             include_only_props=["Título", "Veiculação - YouTube", "Status - YouTube"],
             date_property_name="Veiculação - YouTube",
             date_from=DATE_FROM,
