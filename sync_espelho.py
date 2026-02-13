@@ -19,7 +19,7 @@ MAX_RETRIES = int(os.getenv("MIRROR_MAX_RETRIES", "8"))
 # Limpeza de órfãos roda no máximo 1x a cada N horas
 CLEANUP_EVERY_HOURS = int(os.getenv("MIRROR_CLEANUP_EVERY_HOURS", "24"))
 
-# Máximo de páginas por execução para segurança (0 = sem limite)
+# Máximo de itens mudados por execução (0 = sem limite)
 MAX_CHANGED_PER_RUN = int(os.getenv("MIRROR_MAX_CHANGED_PER_RUN", "0"))
 
 MIRRORS = [
@@ -27,20 +27,25 @@ MIRRORS = [
         "name": "Reuniões",
         "env_origem": "DATABASE_ID_REUNIOES",
         "env_espelho": "DATABASE_ID_REUNIOES_ESPELHO",
+
         "relation_prop_espelho": "Origem",
         "title_prop_origem": "Evento",
         "title_prop_espelho": "Evento",
+
+        # fácil editar
         "copy_props": ["Data", "Local", "Status"],
+
         "transforms": {
             "Participantes": {
                 "mode": "people_to_public_text",
                 "target_prop": "Participantes (público)",
-                "people_public_mode": "count",
+                "people_public_mode": "count",  # privacidade + robustez
                 "label_singular": "participante",
                 "label_plural": "participantes",
                 "separator": ", ",
             }
         },
+
         "cleanup_orphans": True,
     }
 ]
@@ -58,8 +63,12 @@ HEADERS = {
 }
 
 # =============================
-# Helpers: state/index
+# Helpers: keys/state/index
 # =============================
+def mirror_key(cfg: Dict[str, Any], origem_db: str, espelho_db: str) -> str:
+    # chave estável para cada par origem->espelho
+    return f'{cfg.get("name","mirror")}::{origem_db}::{espelho_db}'
+
 def _load_json(path: str, default: Any) -> Any:
     os.makedirs(STATE_DIR, exist_ok=True)
     if not os.path.exists(path):
@@ -78,7 +87,6 @@ def _now_iso() -> str:
 def _parse_iso(dt: Optional[str]) -> Optional[datetime]:
     if not dt:
         return None
-    # aceita "Z" ou offset
     try:
         return datetime.fromisoformat(dt.replace("Z", "+00:00"))
     except Exception:
@@ -276,13 +284,11 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
     if not origem_db or not espelho_db:
         raise RuntimeError(f'Faltando env vars para "{cfg["name"]}"')
 
-    # Keys
     k = mirror_key(cfg, origem_db, espelho_db)
     mirror_state = state.get(k, {})
     last_sync = mirror_state.get("last_sync_time")  # ISO UTC
     last_sync_dt = _parse_iso(last_sync)
 
-    # Schemas
     origem_schema = get_database_schema(origem_db)
     origem_props = {n: (origem_schema.get("properties") or {}).get(n, {}).get("type") for n in (origem_schema.get("properties") or {}).keys()}
     espelho_props = list_properties(espelho_db)
@@ -304,11 +310,9 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
     if cfg.get("transforms") and "Participantes" in cfg["transforms"]:
         participants_prop_id = get_property_id_from_schema(origem_schema, "Participantes")
 
-    # 1) Descobrir itens mudados desde last_sync
-    # Se não tem last_sync, bootstrap: pega tudo (ordenado por last_edited_time)
+    # itens mudados desde last_sync
     filter_obj = None
     if last_sync_dt:
-        # Notion espera ISO string
         filter_obj = {"timestamp": "last_edited_time", "last_edited_time": {"after": last_sync_dt.isoformat()}}
 
     payload = {
@@ -335,17 +339,13 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
 
     print(f"🔄 [{cfg['name']}] last_sync={last_sync or 'None'} | changed={len(changed)}")
 
-    # 2) Aplicar changes
     idx = index.setdefault(k, {})  # origem_id -> espelho_id
     created = 0
     updated = 0
-
     newest_edited: Optional[str] = None
 
     for p in changed:
         origem_page_id = p["id"]
-
-        # Track newest last_edited_time processed
         let = p.get("last_edited_time")
         if let:
             newest_edited = let
@@ -357,7 +357,6 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
             title_prop_espelho: {"title": [{"text": {"content": titulo}}]},
         }
 
-        # copy props 1:1
         for prop_name in cfg.get("copy_props", []):
             if prop_name not in origem_props or prop_name not in espelho_props:
                 continue
@@ -368,13 +367,14 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
             if normalized is not None:
                 props_out[prop_name] = normalized
 
-        # transforms
         transforms = cfg.get("transforms", {}) or {}
         for origem_prop_name, tcfg in transforms.items():
             mode = tcfg.get("mode")
             target_prop = tcfg.get("target_prop", origem_prop_name)
+
             if origem_prop_name not in origem_props or target_prop not in espelho_props:
                 continue
+
             src_prop = p["properties"].get(origem_prop_name)
             if not src_prop:
                 continue
@@ -385,13 +385,11 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
                 if espelho_props[target_prop] != "rich_text":
                     continue
 
-                # people from query
                 people_items: List[Dict[str, Any]] = []
                 people_arr = src_prop.get("people", []) or []
                 for u in people_arr:
                     people_items.append({"id": u.get("id"), "name": u.get("name")})
 
-                # fallback property item
                 if (not people_items or all((not x.get("id") and not x.get("name")) for x in people_items)) and participants_prop_id:
                     try:
                         people_items = fetch_people_property_item(origem_page_id, participants_prop_id)
@@ -421,13 +419,10 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
                 {"parent": {"database_id": espelho_db}, "properties": props_out},
                 context=f"Incremental create ({cfg['name']}) origem_id={origem_page_id}",
             )
-            new_id = created_page["id"]
-            idx[origem_page_id] = new_id
+            idx[origem_page_id] = created_page["id"]
             created += 1
 
-    # 3) Atualizar last_sync_time
-    # Se não teve changed, ainda assim avança um pouco para evitar reprocessar?
-    # Melhor: manter como está (não avançar) quando zero mudanças.
+    # Atualiza last_sync_time apenas se processou algo
     if newest_edited:
         mirror_state["last_sync_time"] = newest_edited
         state[k] = mirror_state
@@ -454,13 +449,11 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
 
     print(f"🧹 [{cfg['name']}] Rodando cleanup de órfãos...")
 
-    # carregar ids da origem
     origin_pages = query_all(origem_db, {"page_size": 100}, context=f"Load all origin ids ({cfg['name']})")
     origin_ids = {p["id"] for p in origin_pages}
 
     rel_prop = cfg["relation_prop_espelho"]
 
-    # varrer espelho e arquivar órfãos (em lotes para não 429)
     cursor = None
     checked = 0
     archived = 0
@@ -490,7 +483,6 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
                 archived += 1
             checked += 1
 
-            # safety throttle
             if checked % 80 == 0:
                 time.sleep(1.5)
 
@@ -501,7 +493,6 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
     state[k] = mirror_state
     _save_json(STATE_FILE, state)
 
-    # opcional: também limpar index (remover chaves que não existem mais)
     idx = index.get(k, {})
     to_del = [oid for oid in idx.keys() if oid not in origin_ids]
     for oid in to_del:
@@ -509,7 +500,7 @@ def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str,
     index[k] = idx
     _save_json(INDEX_FILE, index)
 
-    print(f"🧹 [{cfg['name']}] Cleanup concluído | Verificados={checked} | Arquivados={archived} | Index limpo={len(to_del)}")
+    print(f"🧹 [{cfg['name']}] Cleanup | Verificados={checked} | Arquivados={archived} | Index removidos={len(to_del)}")
 
 def main():
     if not NOTION_API_KEY:
