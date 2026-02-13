@@ -22,6 +22,9 @@ CLEANUP_EVERY_HOURS = int(os.getenv("MIRROR_CLEANUP_EVERY_HOURS", "24"))
 # Máximo de itens mudados por execução (0 = sem limite)
 MAX_CHANGED_PER_RUN = int(os.getenv("MIRROR_MAX_CHANGED_PER_RUN", "0"))
 
+# Log de diagnóstico (sem expor nomes): 0 desliga; >0 mostra contagens nos N primeiros itens
+DEBUG_PEOPLE_SAMPLES = int(os.getenv("MIRROR_DEBUG_PEOPLE_SAMPLES", "0"))
+
 MIRRORS = [
     {
         "name": "Reuniões",
@@ -66,7 +69,6 @@ HEADERS = {
 # Helpers: keys/state/index
 # =============================
 def mirror_key(cfg: Dict[str, Any], origem_db: str, espelho_db: str) -> str:
-    # chave estável para cada par origem->espelho
     return f'{cfg.get("name","mirror")}::{origem_db}::{espelho_db}'
 
 def _load_json(path: str, default: Any) -> Any:
@@ -101,9 +103,7 @@ def _parse_json_safe(r: requests.Response) -> Dict[str, Any]:
     except Exception:
         return {"raw_text": r.text}
 
-def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
-    url = f"{BASE_URL}{path}"
-
+def request_with_retry_url(method: str, url: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
     for attempt in range(MAX_RETRIES + 1):
         if method == "GET":
             r = requests.get(url, headers=HEADERS, timeout=60)
@@ -142,6 +142,10 @@ def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]]
         return r.json()
 
     raise RuntimeError(f"Falhou após retries: {context}")
+
+def request_with_retry(method: str, path: str, payload: Optional[Dict[str, Any]], context: str) -> Dict[str, Any]:
+    url = f"{BASE_URL}{path}"
+    return request_with_retry_url(method, url, payload, context)
 
 def notion_get(path: str, context: str) -> Dict[str, Any]:
     return request_with_retry("GET", path, None, context)
@@ -234,24 +238,35 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
 
 # =============================
 # Robust people fetch (fallback)
+#   ✅ IMPORTANT: pagination uses `next_url`
 # =============================
 def fetch_people_property_item(page_id: str, prop_id: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve a page property item for People.
+    Pagination must follow `next_url` (NOT start_cursor/next_cursor).
+    """
     people: List[Dict[str, Any]] = []
-    cursor = None
-    while True:
-        path = f"/pages/{page_id}/properties/{prop_id}"
-        if cursor:
-            path += f"?start_cursor={cursor}"
-        data = notion_get(path, context=f"Get page property item (people) page={page_id}")
+    url = f"{BASE_URL}/pages/{page_id}/properties/{prop_id}"
+
+    # safety cap
+    for _ in range(1000):
+        data = request_with_retry_url("GET", url, None, context=f"Get page property item (people) page={page_id}")
+
         results = data.get("results", []) or []
         for it in results:
             uid = it.get("id")
             name = it.get("name")
             if uid or name:
                 people.append({"id": uid, "name": name})
+
         if not data.get("has_more"):
             break
-        cursor = data.get("next_cursor")
+
+        next_url = data.get("next_url")
+        if not next_url:
+            break
+        url = next_url
+
     return people
 
 def make_participants_public_text(people_items: List[Dict[str, Any]], mode: str, sep: str, singular: str, plural: str) -> str:
@@ -344,6 +359,8 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
     updated = 0
     newest_edited: Optional[str] = None
 
+    debug_left = DEBUG_PEOPLE_SAMPLES
+
     for p in changed:
         origem_page_id = p["id"]
         let = p.get("last_edited_time")
@@ -385,16 +402,26 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
                 if espelho_props[target_prop] != "rich_text":
                     continue
 
+                # people from query
                 people_items: List[Dict[str, Any]] = []
                 people_arr = src_prop.get("people", []) or []
                 for u in people_arr:
                     people_items.append({"id": u.get("id"), "name": u.get("name")})
 
-                if (not people_items or all((not x.get("id") and not x.get("name")) for x in people_items)) and participants_prop_id:
+                q_count = len([x for x in people_items if x.get("id") or x.get("name")])
+
+                # fallback property item (next_url pagination)
+                f_count = 0
+                if (q_count == 0) and participants_prop_id:
                     try:
                         people_items = fetch_people_property_item(origem_page_id, participants_prop_id)
                     except Exception:
                         people_items = []
+                f_count = len([x for x in people_items if x.get("id") or x.get("name")])
+
+                if debug_left > 0:
+                    print(f"🧪 [{cfg['name']}] people origem_id={origem_page_id} query={q_count} fallback={f_count}")
+                    debug_left -= 1
 
                 people_mode = tcfg.get("people_public_mode", "count")
                 sep = tcfg.get("separator", ", ")
