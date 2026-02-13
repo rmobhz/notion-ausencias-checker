@@ -21,6 +21,21 @@ MAX_CHANGED_PER_RUN = int(os.getenv("MIRROR_MAX_CHANGED_PER_RUN", "0"))
 # salva estado/índice a cada N itens processados (além de salvar após create)
 SAVE_EVERY_N = int(os.getenv("MIRROR_SAVE_EVERY_N", "10"))
 
+def env_bool(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+# ✅ força varredura completa (ignora last_sync_time)
+MIRROR_FORCE_FULL_SYNC = env_bool("MIRROR_FORCE_FULL_SYNC", False)
+
+# opcional: em full sync, só atualiza os já existentes (não cria novos)
+MIRROR_FULL_SYNC_UPDATE_ONLY = env_bool("MIRROR_FULL_SYNC_UPDATE_ONLY", False)
+
+# opcional: em full sync, também atualiza last_sync_time ao final (padrão: não)
+MIRROR_FULL_SYNC_UPDATE_CHECKPOINT = env_bool("MIRROR_FULL_SYNC_UPDATE_CHECKPOINT", False)
+
 MIRRORS = [
     {
         "name": "Reuniões",
@@ -150,10 +165,10 @@ def notion_get(path: str, context: str) -> Dict[str, Any]:
     return request_with_retry("GET", path, None, context)
 
 def notion_post(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    return request_with_retry("POST", path, payload, context)
+    return request_with_retry("POST", path, payload, context=context)
 
 def notion_patch(path: str, payload: Dict[str, Any], context: str) -> Dict[str, Any]:
-    return request_with_retry("PATCH", path, payload, context)
+    return request_with_retry("PATCH", path, payload, context=context)
 
 # =============================
 # Notion helpers
@@ -217,7 +232,6 @@ def to_rich_text(text: str) -> List[Dict[str, Any]]:
     return [{"type": "text", "text": {"content": text}}]
 
 def rich_text_plain_text(rt: List[Dict[str, Any]]) -> str:
-    # transforma qualquer rich_text (com mentions etc.) em texto simples seguro
     return "".join(x.get("plain_text", "") for x in (rt or [])).strip()
 
 def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_espelho: List[str]) -> Optional[Dict[str, Any]]:
@@ -227,7 +241,6 @@ def normalize_for_write(prop: Dict[str, Any], target_type: str, status_options_e
         return {"date": prop.get("date")}
 
     if target_type == "rich_text" and src_type == "rich_text":
-        # ✅ NÃO copiar estrutura (mentions, etc.). Sempre reduzir a plain_text.
         txt = rich_text_plain_text(prop.get("rich_text", []) or [])
         return {"rich_text": to_rich_text(txt)}
 
@@ -283,7 +296,6 @@ def make_participants_text(
     if mode == "names":
         if names:
             return sep.join(names)
-        # se não tiver nomes (limitação de permissão), cai no fallback
         mode = fallback_mode
 
     if mode == "count":
@@ -291,7 +303,6 @@ def make_participants_text(
             return ""
         return f"{count} {singular if count == 1 else plural}"
 
-    # names_or_count
     if names:
         return sep.join(names)
     if count == 0:
@@ -316,9 +327,9 @@ def find_mirror_by_relation(espelho_db: str, rel_prop: str, origem_page_id: str)
     return None
 
 # =============================
-# Incremental sync
+# Core sync (incremental or full)
 # =============================
-def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any]) -> None:
+def sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any], force_full: bool) -> None:
     origem_db = os.getenv(cfg["env_origem"])
     espelho_db = os.getenv(cfg["env_espelho"])
     if not origem_db or not espelho_db:
@@ -346,15 +357,16 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
     if "Status" in espelho_props and espelho_props["Status"] == "status":
         status_options = get_status_options(espelho_db, "Status")
 
-    # preparar fallback para people
     participants_prop_id = None
     transforms = cfg.get("transforms", {}) or {}
     if "Participantes" in transforms:
         participants_prop_id = get_property_id_from_schema(origem_schema, "Participantes")
 
-    # query changed
+    # -------------------------
+    # Query origem (full ou incremental)
+    # -------------------------
     filter_obj = None
-    if last_sync_dt:
+    if (not force_full) and last_sync_dt:
         filter_obj = {"timestamp": "last_edited_time", "last_edited_time": {"after": last_sync_dt.isoformat()}}
 
     payload = {
@@ -370,20 +382,21 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
         body = dict(payload)
         if cursor:
             body["start_cursor"] = cursor
-        data = query_database(origem_db, body, context=f"Query changed ({cfg['name']})")
+        data = query_database(origem_db, body, context=f"Query origem ({cfg['name']}) mode={'FULL' if force_full else 'INCR'}")
         changed.extend(data.get("results", []))
-        if MAX_CHANGED_PER_RUN and len(changed) >= MAX_CHANGED_PER_RUN:
+        if (not force_full) and MAX_CHANGED_PER_RUN and len(changed) >= MAX_CHANGED_PER_RUN:
             changed = changed[:MAX_CHANGED_PER_RUN]
             break
         if not data.get("has_more"):
             break
         cursor = data.get("next_cursor")
 
-    print(f"🔄 [{cfg['name']}] last_sync={last_sync or 'None'} | changed={len(changed)}")
+    print(f"🔄 [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} | last_sync={last_sync or 'None'} | origem_itens={len(changed)} | update_only_full={MIRROR_FULL_SYNC_UPDATE_ONLY}")
 
     idx = index.setdefault(k, {})  # origem_id -> espelho_id
     created = 0
     updated = 0
+    skipped_create = 0
 
     processed = 0
     newest_edited: Optional[str] = None
@@ -432,12 +445,10 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
                 if src_prop.get("type") != "people":
                     continue
 
-                # do query
                 people_items: List[Dict[str, Any]] = []
                 for u in (src_prop.get("people", []) or []):
                     people_items.append({"id": u.get("id"), "name": u.get("name")})
 
-                # fallback property item
                 q_count = len([x for x in people_items if x.get("id") or x.get("name")])
                 if q_count == 0 and participants_prop_id:
                     try:
@@ -461,51 +472,68 @@ def incremental_sync(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str
             mirror_id = find_mirror_by_relation(espelho_db, rel_prop, origem_page_id)
             if mirror_id:
                 idx[origem_page_id] = mirror_id
-                _save_json(INDEX_FILE, index)  # salva imediatamente
+                _save_json(INDEX_FILE, index)
 
         try:
             if mirror_id:
                 notion_patch(
                     f"/pages/{mirror_id}",
                     {"properties": props_out},
-                    context=f"Incremental update ({cfg['name']}) espelho_id={mirror_id}",
+                    context=f"Update espelho ({cfg['name']}) espelho_id={mirror_id}",
                 )
                 updated += 1
             else:
-                created_page = notion_post(
-                    "/pages",
-                    {"parent": {"database_id": espelho_db}, "properties": props_out},
-                    context=f"Incremental create ({cfg['name']}) origem_id={origem_page_id}",
-                )
-                idx[origem_page_id] = created_page["id"]
-                created += 1
-
-                # ✅ salva índice imediatamente para evitar duplicação em caso de cancelamento
-                _save_json(INDEX_FILE, index)
+                if force_full and MIRROR_FULL_SYNC_UPDATE_ONLY:
+                    skipped_create += 1
+                else:
+                    created_page = notion_post(
+                        "/pages",
+                        {"parent": {"database_id": espelho_db}, "properties": props_out},
+                        context=f"Create espelho ({cfg['name']}) origem_id={origem_page_id}",
+                    )
+                    idx[origem_page_id] = created_page["id"]
+                    created += 1
+                    _save_json(INDEX_FILE, index)
 
         except Exception as e:
-            # não derruba a execução inteira por um item ruim
             print(f"⚠️ [{cfg['name']}] Falha ao sincronizar origem_id={origem_page_id}. Pulando item. Erro: {e}")
             continue
 
         processed += 1
         if processed % SAVE_EVERY_N == 0:
-            # salva progresso parcial
-            if newest_edited:
+            # salva progresso parcial no incremental (full, só se você pedir)
+            if (not force_full) and newest_edited:
                 mirror_state["last_sync_time"] = newest_edited
                 state[k] = mirror_state
                 _save_json(STATE_FILE, state)
+            elif force_full and MIRROR_FULL_SYNC_UPDATE_CHECKPOINT and newest_edited:
+                mirror_state["last_sync_time"] = newest_edited
+                state[k] = mirror_state
+                _save_json(STATE_FILE, state)
+
             _save_json(INDEX_FILE, index)
 
     # salva no final
     if newest_edited:
-        mirror_state["last_sync_time"] = newest_edited
-        state[k] = mirror_state
-        _save_json(STATE_FILE, state)
+        if (not force_full):
+            mirror_state["last_sync_time"] = newest_edited
+            state[k] = mirror_state
+            _save_json(STATE_FILE, state)
+        elif force_full and MIRROR_FULL_SYNC_UPDATE_CHECKPOINT:
+            mirror_state["last_sync_time"] = newest_edited
+            state[k] = mirror_state
+            _save_json(STATE_FILE, state)
+
         _save_json(INDEX_FILE, index)
 
-    print(f"✅ [{cfg['name']}] Incremental | Criados={created} | Atualizados={updated} | last_sync_time={state.get(k, {}).get('last_sync_time')}")
+    if force_full and (not MIRROR_FULL_SYNC_UPDATE_CHECKPOINT):
+        print(f"ℹ️ [{cfg['name']}] FULL: não atualizei last_sync_time (por padrão). Use MIRROR_FULL_SYNC_UPDATE_CHECKPOINT=1 se quiser.")
 
+    print(f"✅ [{cfg['name']}] mode={'FULL' if force_full else 'INCR'} | Criados={created} | Atualizados={updated} | SkippedCreate={skipped_create} | last_sync_time={state.get(k, {}).get('last_sync_time')}")
+
+# =============================
+# Cleanup orphans
+# =============================
 def cleanup_orphans(cfg: Dict[str, Any], state: Dict[str, Any], index: Dict[str, Any]) -> None:
     if not cfg.get("cleanup_orphans"):
         return
@@ -580,11 +608,15 @@ def main():
     if not NOTION_API_KEY:
         raise RuntimeError("Faltando NOTION_API_KEY.")
 
+    print(f"[cfg] MIRROR_FORCE_FULL_SYNC raw={os.getenv('MIRROR_FORCE_FULL_SYNC')} parsed={MIRROR_FORCE_FULL_SYNC}")
+    print(f"[cfg] MIRROR_FULL_SYNC_UPDATE_ONLY raw={os.getenv('MIRROR_FULL_SYNC_UPDATE_ONLY')} parsed={MIRROR_FULL_SYNC_UPDATE_ONLY}")
+    print(f"[cfg] MIRROR_FULL_SYNC_UPDATE_CHECKPOINT raw={os.getenv('MIRROR_FULL_SYNC_UPDATE_CHECKPOINT')} parsed={MIRROR_FULL_SYNC_UPDATE_CHECKPOINT}")
+
     state = _load_json(STATE_FILE, {})
     index = _load_json(INDEX_FILE, {})
 
     for cfg in MIRRORS:
-        incremental_sync(cfg, state, index)
+        sync(cfg, state, index, force_full=MIRROR_FORCE_FULL_SYNC)
         cleanup_orphans(cfg, state, index)
 
 if __name__ == "__main__":
