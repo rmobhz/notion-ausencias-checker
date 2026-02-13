@@ -64,7 +64,7 @@ jobs:
           # NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
 
           # IDs do YouTube
-          # DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_YOUTUBE }}
+          # DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
           # DATABASE_ID_YOUTUBE_ESPELHO: ${{ secrets.DATABASE_ID_YOUTUBE_ESPELHO }}
 
           # IDs de reuniões podem ficar, mas NÃO serão usados
