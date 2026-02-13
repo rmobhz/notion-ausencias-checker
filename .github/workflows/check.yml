@@ -2,8 +2,8 @@ name: Verificar Conflitos no Notion
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch:
+    - cron: "*/15 * * * *"  # Executa a cada 15 minutos
+  workflow_dispatch:        # Permite execução manual pelo GitHub
 
 concurrency:
   group: notion-automations
@@ -17,7 +17,7 @@ jobs:
       - name: Clonar repositório
         uses: actions/checkout@v3
 
-      # 1) RESTORE do estado
+      # ✅ RESTORE do estado (.state) — cache mutável via prefixo
       - name: Restaurar estado (.state)
         id: cache-restore
         uses: actions/cache/restore@v4
@@ -35,16 +35,16 @@ jobs:
       - name: Instalar dependências
         run: pip install requests notion-client python-dateutil
 
-      - name: Executar scripts (não espelho)
+      - name: Executar scripts de verificação e automação (não espelho)
         run: |
-          # echo "▶️ Verificando conflitos entre reuniões e ausências..."
-          # python notion_check.py
-          # echo "▶️ Verificando conflitos de sala GCMD..."
-          # python check_gcmd_room_conflicts.py
-          # echo "▶️ Verificando calendário editorial..."
-          # python notion_check_calendario.py
-          # echo "▶️ Criando reuniões recorrentes..."
-          # python create_recurring_meetings.py
+          echo "▶️ Verificando conflitos entre reuniões e ausências..."
+          python notion_check.py
+          echo "▶️ Verificando conflitos de sala GCMD..."
+          python check_gcmd_room_conflicts.py
+          echo "▶️ Verificando calendário editorial..."
+          python notion_check_calendario.py
+          echo "▶️ Criando reuniões recorrentes..."
+          python create_recurring_meetings.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
@@ -54,8 +54,9 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
 
-      # 2) Sync do espelho (sempre roda)
-      - name: Sincronizar bases espelho (sempre)
+      # ✅ Espelho roda SEMPRE (mesmo se outro script falhar),
+      # garantindo que o incremental evolui o estado/índice.
+      - name: Sincronizar bases espelho a serem publicadas (sempre)
         if: always()
         run: |
           echo "▶️ Sincronizando bases espelho a serem publicadas..."
@@ -64,8 +65,13 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
           DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
+          # opcionais (se quiser controlar sem editar o script):
+          # MIRROR_BASE_SLEEP: "0.2"
+          # MIRROR_MAX_RETRIES: "10"
+          # MIRROR_CLEANUP_EVERY_HOURS: "24"
+          # MIRROR_MAX_CHANGED_PER_RUN: "300"
 
-      # 3) SAVE do estado (key nova)
+      # ✅ SAVE do estado (.state) — key nova por run (cache é imutável)
       - name: Salvar estado (.state)
         if: always()
         uses: actions/cache/save@v4
