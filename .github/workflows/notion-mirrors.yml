@@ -57,8 +57,8 @@ jobs:
           # ==================================================
 
           # "1" = roda | "0" = ignora completamente
-          RUN_YOUTUBE: "0"      # 🔴 por enquanto desligado
-          RUN_REUNIOES: "0"     # 🔴 desligado
+          RUN_YOUTUBE: "0"
+          RUN_REUNIOES: "1"
 
           # ==================================================
           # 🧪 OPCIONAIS DE TESTE / SEGURANÇA
@@ -68,7 +68,7 @@ jobs:
           # MIRROR_LIMIT: "20"
 
           # Simula (não grava nada no destino)
-          # MIRROR_DRY_RUN: "1"
+          MIRROR_DRY_RUN: "1"
 
           # Pausa entre requests (evita rate limit)
           # MIRROR_SLEEP_MS: "150"
@@ -81,7 +81,7 @@ jobs:
           # MIRROR_FORCE_FULL_SYNC: "1"
 
           # Tenta incremental se o script suportar
-          # MIRROR_INCREMENTAL: "1"
+          MIRROR_INCREMENTAL: "1"
 
       - name: Salvar estado do espelho (.state)
         if: always()
