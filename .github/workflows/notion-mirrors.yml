@@ -68,7 +68,7 @@ jobs:
           # MIRROR_LIMIT: "20"
 
           # Simula (não grava nada no destino)
-          MIRROR_DRY_RUN: "1"
+          # MIRROR_DRY_RUN: "1"
 
           # Pausa entre requests (evita rate limit)
           # MIRROR_SLEEP_MS: "150"
