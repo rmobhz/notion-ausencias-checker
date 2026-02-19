@@ -1,0 +1,91 @@
+name: Notion - Espelhamentos (diário)
+
+on:
+  # 03:30 BRT = 06:30 UTC
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  # 🔒 Só cancela OUTROS espelhos
+  group: notion-automations-mirrors
+  cancel-in-progress: true
+
+jobs:
+  mirrors:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar repositório
+        uses: actions/checkout@v3
+
+      - name: Restaurar estado do espelho (.state)
+        uses: actions/cache/restore@v4
+        with:
+          path: .state
+          key: gcmd-mirror-state-${{ github.run_number }}
+          restore-keys: |
+            gcmd-mirror-state-
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Instalar dependências
+        run: pip install requests notion-client python-dateutil
+
+      - name: Sincronizar espelhos (YouTube / Reuniões)
+        run: |
+          echo "▶️ Rodando sync_espelho.py"
+          python sync_espelho.py
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+
+          # ==================================================
+          # 🔗 ORIGENS / DESTINOS
+          # ==================================================
+
+          DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
+          DATABASE_ID_YOUTUBE_ESPELHO: ${{ secrets.DATABASE_ID_YOUTUBE_ESPELHO }}
+
+          DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
+          DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
+
+          # ==================================================
+          # 🎛️ CONTROLES (CHAVE DO COMPORTAMENTO)
+          # ==================================================
+
+          # "1" = roda | "0" = ignora completamente
+          RUN_YOUTUBE: "0"      # 🔴 por enquanto desligado
+          RUN_REUNIOES: "0"     # 🔴 desligado
+
+          # ==================================================
+          # 🧪 OPCIONAIS DE TESTE / SEGURANÇA
+          # ==================================================
+
+          # Limita número de itens (bom para validação inicial)
+          # MIRROR_LIMIT: "20"
+
+          # Simula (não grava nada no destino)
+          # MIRROR_DRY_RUN: "1"
+
+          # Pausa entre requests (evita rate limit)
+          # MIRROR_SLEEP_MS: "150"
+
+          # ==================================================
+          # 🔁 MODO DE SINCRONIZAÇÃO
+          # ==================================================
+
+          # Força FULL SYNC (ignora incremental)
+          # MIRROR_FORCE_FULL_SYNC: "1"
+
+          # Tenta incremental se o script suportar
+          # MIRROR_INCREMENTAL: "1"
+
+      - name: Salvar estado do espelho (.state)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .state
+          key: gcmd-mirror-state-${{ github.run_number }}
