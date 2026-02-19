@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
+  # 🔒 Só cancela OUTRAS checagens, não o espelho
   group: notion-automations-checks
   cancel-in-progress: true
 
@@ -17,9 +18,7 @@ jobs:
       - name: Clonar repositório
         uses: actions/checkout@v3
 
-      # ✅ RESTORE do estado (.state)
       - name: Restaurar estado (.state)
-        id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: .state
@@ -35,18 +34,18 @@ jobs:
       - name: Instalar dependências
         run: pip install requests notion-client python-dateutil
 
-      - name: Executar checagens e automações (sem espelho)
+      - name: Executar checagens e automações
         run: |
-          echo "▶️ Verificando conflitos entre reuniões e ausências..."
+          echo "▶️ Conflitos reuniões x ausências"
           python notion_check.py
 
-          echo "▶️ Verificando conflitos de sala GCMD..."
+          echo "▶️ Conflitos sala GCMD"
           python check_gcmd_room_conflicts.py
 
-          echo "▶️ Verificando calendário editorial..."
+          echo "▶️ Calendário editorial"
           python notion_check_calendario.py
 
-          echo "▶️ Criando reuniões recorrentes..."
+          echo "▶️ Reuniões recorrentes"
           python create_recurring_meetings.py
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
@@ -54,10 +53,9 @@ jobs:
           DATABASE_ID_REUNIOES_TESTE: ${{ secrets.DATABASE_ID_REUNIOES_TESTE }}
           DATABASE_ID_AUSENCIAS: ${{ secrets.DATABASE_ID_AUSENCIAS }}
           DATABASE_ID_CALENDARIOEDITORIAL: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
-      # ✅ SAVE do estado (.state)
       - name: Salvar estado (.state)
         if: always()
         uses: actions/cache/save@v4
