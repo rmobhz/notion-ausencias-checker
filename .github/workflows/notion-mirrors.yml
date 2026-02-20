@@ -66,8 +66,8 @@ jobs:
           # ==================================================
 
           # "1" = roda | "0" = ignora completamente
-          RUN_YOUTUBE: "0"
-          RUN_REUNIOES: "0"
+          RUN_YOUTUBE: "1"
+          RUN_REUNIOES: "1"
           RUN_CALENDARIOEDITORIAL: "1"
 
           # ==================================================
