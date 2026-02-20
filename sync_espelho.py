@@ -181,8 +181,9 @@ def plain_text_from_title(prop: Dict[str, Any]) -> str:
 
 def plain_text_from_people(prop: Dict[str, Any]) -> str:
     ppl = prop.get("people", []) or []
-    names = [p.get("name") for p in ppl if p.get("name")]
-    return " | ".join(names)
+    names = [p.get("name", "").strip() for p in ppl]
+    names = [n for n in names if n]
+    return ", ".join(names)
 
 
 def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
