@@ -220,12 +220,13 @@ def sanitize_icon(icon: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
     return None
 
-MAX_NOTION_TEXT = 2000
+MAX_NOTION_TEXT = 1900  # margem contra contagem diferente (unicode/emojis)
 
 def rich_text_chunks(text: str, max_len: int = MAX_NOTION_TEXT) -> List[Dict[str, Any]]:
     """
     Divide um texto grande em vários blocos rich_text.
-    O Notion limita text.content a 2000 por item.
+    Notion valida limite ~2000 por bloco, mas pode contar diferente com unicode.
+    Usamos 1900 para evitar 400.
     """
     if not text:
         return []
