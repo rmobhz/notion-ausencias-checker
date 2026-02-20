@@ -4,50 +4,19 @@
 """
 sync_espelho.py — Um único script para espelhar múltiplas bases no Notion
 
-✅ O que este script faz
-- Roda ESPÉLHOS de:
-  - Reuniões (opcional)
-  - YouTube (opcional)
-- Permite escolher o que executar via ENV:
-  RUN_REUNIOES=0/1
-  RUN_YOUTUBE=0/1
-- Permite "modo teste" sem escrever nada:
-  MIRROR_DRY_RUN=1
-- Permite limitar quantidade de registros processados:
-  MIRROR_LIMIT=20
-- Filtra itens a partir de 2026 (>= 2026-01-01) para as bases que tiverem date_property_name configurado
+✅ Atualização (Reuniões)
+- Reuniões agora NÃO copia tudo.
+- Copia SOMENTE: Evento, Data, Local, Status, Participantes e Origem.
+- Participantes: se na origem for "people" e no espelho for "rich_text",
+  converte para texto "Nome 1 | Nome 2 | ...".
+- Origem: força a relação do espelho apontando para a página original (source_id),
+  desde que a propriedade "Origem" no espelho seja do tipo relation e esteja ligada
+  ao DB original de Reuniões.
 
-✅ Correção do seu erro atual
-- Se você passar um ID que é "page" (página que contém a base), o script tenta resolver automaticamente
-  o database_id real procurando um bloco child_database dentro da página.
-  Isso evita o erro: "Provided ID ... is a page, not a database".
-
-ENV obrigatórias
-  NOTION_API_KEY
-
-ENV do YouTube
-  DATABASE_ID_YOUTUBE            (pode ser DB ID ou PAGE ID)
-  DATABASE_ID_YOUTUBE_ESPELHO    (pode ser DB ID ou PAGE ID)
-
-ENV de Reuniões (se RUN_REUNIOES=1)
-  DATABASE_ID_REUNIOES
-  DATABASE_ID_REUNIOES_ESPELHO
-  REUNIOES_DATE_PROP   (opcional, default "Data")
-
-Flags (opcionais)
-  RUN_REUNIOES=0/1          (default 0)
-  RUN_YOUTUBE=0/1           (default 1)
-  MIRROR_DRY_RUN=0/1        (default 0)
-  MIRROR_LIMIT=N            (default 0 = sem limite)
-  MIRROR_FORCE_FULL_SYNC=1  (default 1)
-  MIRROR_INCREMENTAL=0/1    (default 0)  # usa last_sync_time do estado
-  MIRROR_UPDATE_ARCHIVED=1  (default 1)
-  MIRROR_SLEEP_MS=150       (default 150)
-
-Observação
-- O script usa estado local em .state/ para mapear:
-    source_page_id -> mirror_page_id
-  evitando duplicações.
+⚠️ Importante (Incremental)
+- Para rodar incremental de verdade, configure:
+  MIRROR_INCREMENTAL=1
+  MIRROR_FORCE_FULL_SYNC=0
 """
 
 import os
@@ -83,7 +52,6 @@ SLEEP_SEC = max(0, MIRROR_SLEEP_MS) / 1000.0
 
 # A partir de 2026
 DATE_FROM = "2026-01-01"
-
 
 # =========================
 # HTTP helpers
@@ -123,10 +91,6 @@ def http_patch(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # Resolver DB ID a partir de PAGE ID (child_database)
 # =========================
 def resolve_child_database_from_page(page_id: str) -> str:
-    """
-    Busca um bloco child_database dentro de uma página e retorna o ID do database.
-    Pagina o endpoint /blocks/{id}/children.
-    """
     start_cursor: Optional[str] = None
     while True:
         url = f"{BASE_URL}/blocks/{page_id}/children?page_size=100"
@@ -151,19 +115,12 @@ def resolve_child_database_from_page(page_id: str) -> str:
 
 
 def resolve_database_id(maybe_db_or_page_id: str, label: str) -> str:
-    """
-    Aceita DB ID ou PAGE ID.
-    - Tenta primeiro GET /databases/{id}. Se der certo, é DB.
-    - Se falhar, tenta resolver como page -> child_database.
-    """
-    # 1) tenta como database
     try:
         _ = http_get(f"{BASE_URL}/databases/{maybe_db_or_page_id}")
         return maybe_db_or_page_id
     except Exception:
         pass
 
-    # 2) tenta como page contendo child_database
     db_id = resolve_child_database_from_page(maybe_db_or_page_id)
     print(f"ℹ️ [{label}] ID informado era PAGE; resolvido para DATABASE: {db_id}")
     return db_id
@@ -214,6 +171,20 @@ def is_archived(page: Dict[str, Any]) -> bool:
     return bool(page.get("archived", False))
 
 
+def plain_text_from_rich(prop: Dict[str, Any]) -> str:
+    return "".join([p.get("plain_text", "") for p in prop.get("rich_text", [])])
+
+
+def plain_text_from_title(prop: Dict[str, Any]) -> str:
+    return "".join([p.get("plain_text", "") for p in prop.get("title", [])])
+
+
+def plain_text_from_people(prop: Dict[str, Any]) -> str:
+    ppl = prop.get("people", []) or []
+    names = [p.get("name") for p in ppl if p.get("name")]
+    return " | ".join(names)
+
+
 def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Converte uma propriedade da API (origem) para payload de escrita (destino).
@@ -226,10 +197,10 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     if t == "title":
-        text = "".join([p.get("plain_text", "") for p in prop.get("title", [])])
+        text = plain_text_from_title(prop)
         return {"title": [{"type": "text", "text": {"content": text}}]}
     if t == "rich_text":
-        text = "".join([p.get("plain_text", "") for p in prop.get("rich_text", [])])
+        text = plain_text_from_rich(prop)
         return {"rich_text": [{"type": "text", "text": {"content": text}}]} if text else {"rich_text": []}
     if t == "number":
         return {"number": prop.get("number")}
@@ -263,17 +234,57 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def build_dest_properties(source_page: Dict[str, Any], include_only_props: Optional[List[str]]) -> Dict[str, Any]:
+def get_database_schema(db_id: str) -> Dict[str, Any]:
+    return http_get(f"{BASE_URL}/databases/{db_id}")
+
+
+def build_dest_properties(
+    source_page: Dict[str, Any],
+    include_only_props: Optional[List[str]],
+    *,
+    mirror_db_schema: Optional[Dict[str, Any]] = None,
+    force_origin_relation_prop: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Monta o payload de properties a escrever no destino.
+
+    - include_only_props: whitelist de nomes de propriedades.
+    - mirror_db_schema: schema do DB destino para permitir conversões (ex.: people->rich_text).
+    - force_origin_relation_prop:
+        se informado (ex.: "Origem"), força escrever relation apontando para source_id
+        (útil para manter vínculo com o item original).
+    """
     src_props = source_page.get("properties", {}) or {}
     dest: Dict[str, Any] = {}
+
+    # Mapa do schema do destino: nome -> tipo
+    dest_prop_types: Dict[str, str] = {}
+    if mirror_db_schema:
+        for pname, pdef in (mirror_db_schema.get("properties", {}) or {}).items():
+            ptype = pdef.get("type")
+            if ptype:
+                dest_prop_types[pname] = ptype
 
     for prop_name, prop in src_props.items():
         if include_only_props is not None and prop_name not in include_only_props:
             continue
 
+        # Conversão especial: origem people -> destino rich_text (ex.: "Participantes")
+        if prop.get("type") == "people" and dest_prop_types.get(prop_name) == "rich_text":
+            txt = plain_text_from_people(prop)
+            dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
+            continue
+
         payload = build_property_payload(prop)
         if payload is not None:
             dest[prop_name] = payload
+
+    # Força a relação "Origem" no espelho apontando para o source_id
+    if include_only_props is not None and force_origin_relation_prop:
+        if force_origin_relation_prop in include_only_props:
+            # Só escreve se no destino a prop existir e for relation; se não, deixa claro no log depois (via erro do Notion)
+            if dest_prop_types.get(force_origin_relation_prop) == "relation":
+                dest[force_origin_relation_prop] = {"relation": [{"id": source_page["id"]}]}
 
     return dest
 
@@ -354,6 +365,7 @@ def mirror_database(
     date_property_name: Optional[str],
     date_from: str,
     sort_by_date: bool = True,
+    force_origin_relation_prop: Optional[str] = None,
 ) -> None:
     state = load_state(name)
     mappings: Dict[str, str] = state.get("mappings", {}) or {}
@@ -366,6 +378,9 @@ def mirror_database(
     if sort_by_date and date_property_name:
         sorts = [{"property": date_property_name, "direction": "ascending"}]
 
+    # Schema do destino para suportar conversões (people->rich_text, e validar Origem relation)
+    mirror_schema = get_database_schema(mirror_db_id)
+
     pages = query_database_pages(
         db_id=source_db_id,
         date_property_name=date_property_name,
@@ -374,9 +389,11 @@ def mirror_database(
         sorts=sorts,
     )
 
+    mode = "DRY_RUN" if MIRROR_DRY_RUN else ("FULL" if MIRROR_FORCE_FULL_SYNC or not MIRROR_INCREMENTAL else "INCR")
     print(
-        f"🔄 [{name}] mode={'DRY_RUN' if MIRROR_DRY_RUN else ('FULL' if MIRROR_FORCE_FULL_SYNC or not MIRROR_INCREMENTAL else 'INCR')}"
+        f"🔄 [{name}] mode={mode}"
         f" | origem_itens={len(pages)} | from={date_from} | date_prop={date_property_name or 'N/A'}"
+        + (f" | incremental_after={incremental_after}" if incremental_after else "")
     )
 
     # limita itens (modo teste)
@@ -397,7 +414,12 @@ def mirror_database(
             continue
 
         try:
-            props = build_dest_properties(page, include_only_props=include_only_props)
+            props = build_dest_properties(
+                page,
+                include_only_props=include_only_props,
+                mirror_db_schema=mirror_schema,
+                force_origin_relation_prop=force_origin_relation_prop,
+            )
 
             if MIRROR_DRY_RUN:
                 continue  # não grava nem altera estado
@@ -451,7 +473,7 @@ def main() -> None:
     require_env("NOTION_API_KEY")
 
     # -------------------------
-    # REUNIÕES (mantido, mas só roda se RUN_REUNIOES=1)
+    # REUNIÕES
     # -------------------------
     if RUN_REUNIOES:
         src = require_env("DATABASE_ID_REUNIOES")
@@ -462,26 +484,28 @@ def main() -> None:
         src = resolve_database_id(src, "Reuniões/origem")
         dst = resolve_database_id(dst, "Reuniões/espelho")
 
+        # ✅ Só publica um subconjunto de props
+        # Obs.: "Origem" aqui é a relation no espelho que aponta para a página original (source_id).
         mirror_database(
             name="Reuniões",
             source_db_id=src,
             mirror_db_id=dst,
-            include_only_props=None,  # copia tudo que for gravável
+            include_only_props=["Evento", "Data", "Local", "Status", "Participantes", "Origem"],
             date_property_name=REUNIOES_DATE_PROP,
             date_from=DATE_FROM,
             sort_by_date=True,
+            force_origin_relation_prop="Origem",
         )
     else:
         print("⏭️ [Reuniões] Ignorado (RUN_REUNIOES=0)")
 
     # -------------------------
-    # YOUTUBE (default: roda)
+    # YOUTUBE
     # -------------------------
     if RUN_YOUTUBE:
         src = require_env("DATABASE_ID_YOUTUBE")
         dst = require_env("DATABASE_ID_YOUTUBE_ESPELHO")
 
-        # Resolve IDs caso tenham vindo como PAGE ID
         src = resolve_database_id(src, "YouTube/origem")
         dst = resolve_database_id(dst, "YouTube/espelho")
 
