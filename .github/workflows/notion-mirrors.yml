@@ -36,10 +36,10 @@ jobs:
         run: pip install requests notion-client python-dateutil
 
       # Reset do estado do espelho de reuniões
-      - name: Reset do estado do espelho (somente Reuniões)
-        run: |
-          echo "🧹 Limpando state do espelho de Reuniões..."
-          rm -f .state/mirror_reunies.json .state/mirror_reuniões.json .state/mirror_reunioes.json
+      # - name: Reset do estado do espelho (somente Reuniões)
+      #  run: |
+      #    echo "🧹 Limpando state do espelho de Reuniões..."
+      #    rm -f .state/mirror_reunies.json .state/mirror_reuniões.json .state/mirror_reunioes.json
 
       - name: Sincronizar espelhos (YouTube / Reuniões)
         run: |
