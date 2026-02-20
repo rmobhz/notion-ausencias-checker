@@ -1,35 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-sync_espelho.py — Um único script para espelhar múltiplas bases no Notion
-
-✅ Reuniões
-- Copia SOMENTE: Evento, Data, Local, Status, Participantes e Origem.
-- Participantes: se na origem for "people" e no espelho for "rich_text",
-  converte para texto "Nome 1, Nome 2, ...".
-- Origem: força a relação do espelho apontando para a página original (source_id),
-  desde que a propriedade "Origem" no espelho seja do tipo relation e esteja ligada
-  ao DB original de Reuniões.
-
-✅ YouTube
-- Copia: Título, Veiculação - YouTube, Status - YouTube e Origem.
-- Filtra a origem pela propriedade multi_select "Plataforma" que contenha "YouTube".
-- Usa DATE_FROM (on_or_after) com base em "Veiculação - YouTube".
-
-✅ Ícones
-- Copia o ícone da página (emoji/external; file vira external quando possível)
-- Aplica no create e no update do espelho
-
-⚠️ Importante (Incremental)
-- Para rodar incremental de verdade, configure:
-  MIRROR_INCREMENTAL=1
-  MIRROR_FORCE_FULL_SYNC=0
-"""
-
 import os
 import json
 import time
+import random
 import requests
 from typing import Any, Dict, List, Optional
 
@@ -42,12 +17,16 @@ BASE_URL = "https://api.notion.com/v1"
 
 STATE_DIR = ".state"
 
+# Seleção do que roda (por padrão, só YouTube)
 RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
+RUN_CALENDARIOEDITORIAL = os.getenv("RUN_CALENDARIOEDITORIAL", "0").strip() == "1"
 
+# Segurança / teste
 MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"
 MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())
 
+# Execução
 MIRROR_FORCE_FULL_SYNC = os.getenv("MIRROR_FORCE_FULL_SYNC", "1").strip() == "1"
 MIRROR_INCREMENTAL = os.getenv("MIRROR_INCREMENTAL", "0").strip() == "1"
 MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
@@ -55,10 +34,15 @@ MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
 MIRROR_SLEEP_MS = int(os.getenv("MIRROR_SLEEP_MS", "150").strip())
 SLEEP_SEC = max(0, MIRROR_SLEEP_MS) / 1000.0
 
+# A partir de 2026
 DATE_FROM = "2026-01-01"
 
+# Retry para instabilidades (Cloudflare/Notion)
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
 # =========================
-# HTTP helpers
+# HTTP helpers (com retry)
 # =========================
 def notion_headers() -> Dict[str, str]:
     if not NOTION_API_KEY:
@@ -70,25 +54,52 @@ def notion_headers() -> Dict[str, str]:
     }
 
 
+def request_with_retry(method: str, url: str, payload: Optional[Dict[str, Any]] = None, max_attempts: int = 6) -> Dict[str, Any]:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if method == "GET":
+                r = requests.get(url, headers=notion_headers(), timeout=60)
+            elif method == "POST":
+                r = requests.post(url, headers=notion_headers(), json=payload, timeout=60)
+            elif method == "PATCH":
+                r = requests.patch(url, headers=notion_headers(), json=payload, timeout=60)
+            else:
+                raise RuntimeError(f"Método inválido: {method}")
+
+            if r.status_code < 400:
+                return r.json()
+
+            if r.status_code in RETRY_STATUS:
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    sleep_s = float(retry_after)
+                else:
+                    sleep_s = min(30.0, (2 ** (attempt - 1)) * 0.8 + random.random())
+
+                print(f"↩️  retry {attempt}/{max_attempts} {method} {r.status_code} em {sleep_s:.1f}s")
+                time.sleep(sleep_s)
+                continue
+
+            raise RuntimeError(f"HTTP {r.status_code} {method} {url}\n{r.text}")
+
+        except requests.RequestException as e:
+            sleep_s = min(30.0, (2 ** (attempt - 1)) * 0.8 + random.random())
+            print(f"↩️  retry {attempt}/{max_attempts} {method} exception em {sleep_s:.1f}s: {e}")
+            time.sleep(sleep_s)
+
+    raise RuntimeError(f"Falhou após {max_attempts} tentativas: {method} {url}")
+
+
 def http_get(url: str) -> Dict[str, Any]:
-    r = requests.get(url, headers=notion_headers(), timeout=60)
-    if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code} GET {url}\n{r.text}")
-    return r.json()
+    return request_with_retry("GET", url)
 
 
 def http_post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    r = requests.post(url, headers=notion_headers(), json=payload, timeout=60)
-    if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code} POST {url}\n{r.text}")
-    return r.json()
+    return request_with_retry("POST", url, payload=payload)
 
 
 def http_patch(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    r = requests.patch(url, headers=notion_headers(), json=payload, timeout=60)
-    if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code} PATCH {url}\n{r.text}")
-    return r.json()
+    return request_with_retry("PATCH", url, payload=payload)
 
 
 # =========================
@@ -191,12 +202,6 @@ def plain_text_from_people(prop: Dict[str, Any]) -> str:
 
 
 def sanitize_icon(icon: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """
-    Retorna um icon compatível para escrita.
-    - emoji: ok
-    - external: ok
-    - file: tenta converter para external (url pode expirar; em geral funciona)
-    """
     if not icon:
         return None
 
@@ -225,38 +230,52 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if t == "title":
         text = plain_text_from_title(prop)
         return {"title": [{"type": "text", "text": {"content": text}}]}
+
     if t == "rich_text":
         text = plain_text_from_rich(prop)
         return {"rich_text": [{"type": "text", "text": {"content": text}}]} if text else {"rich_text": []}
+
     if t == "number":
         return {"number": prop.get("number")}
+
     if t == "select":
         sel = prop.get("select")
-        # ✅ Escreve por NOME (IDs não batem entre DBs)
+        # ✅ Escrever por NOME (IDs não batem entre DBs)
         return {"select": {"name": sel.get("name")}} if sel and sel.get("name") else {"select": None}
+
     if t == "multi_select":
         ms = prop.get("multi_select", []) or []
-        # ✅ Escreve por NOME (IDs não batem entre DBs)
+        # ✅ Escrever por NOME (IDs não batem entre DBs)
         return {"multi_select": [{"name": o.get("name")} for o in ms if o.get("name")]}
+
     if t == "status":
         st = prop.get("status")
+        # status também aceita name, mas o destino precisa ter a opção configurada (recomendado)
         return {"status": {"name": st.get("name")}} if st and st.get("name") else {"status": None}
+
     if t == "date":
         return {"date": prop.get("date")}
+
     if t == "checkbox":
         return {"checkbox": bool(prop.get("checkbox", False))}
+
     if t == "url":
         return {"url": prop.get("url")}
+
     if t == "email":
         return {"email": prop.get("email")}
+
     if t == "phone_number":
         return {"phone_number": prop.get("phone_number")}
+
     if t == "people":
         ppl = prop.get("people", [])
         return {"people": [{"id": p["id"]} for p in ppl if p.get("id")]}
+
     if t == "relation":
         rel = prop.get("relation", [])
         return {"relation": [{"id": r["id"]} for r in rel if r.get("id")]}
+
     if t == "files":
         return {"files": prop.get("files", [])}
 
@@ -288,6 +307,7 @@ def build_dest_properties(
         if include_only_props is not None and prop_name not in include_only_props:
             continue
 
+        # Conversão people -> rich_text (quando o espelho tem texto)
         if prop.get("type") == "people" and dest_prop_types.get(prop_name) == "rich_text":
             txt = plain_text_from_people(prop)
             dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
@@ -297,6 +317,7 @@ def build_dest_properties(
         if payload is not None:
             dest[prop_name] = payload
 
+    # Força Origem relation -> source_id
     if include_only_props is not None and force_origin_relation_prop:
         if force_origin_relation_prop in include_only_props:
             if dest_prop_types.get(force_origin_relation_prop) == "relation":
@@ -508,7 +529,7 @@ def main() -> None:
     require_env("NOTION_API_KEY")
 
     # -------------------------
-    # REUNIÕES (não mexer)
+    # REUNIÕES (mantém como está)
     # -------------------------
     if RUN_REUNIOES:
         src = require_env("DATABASE_ID_REUNIOES")
@@ -532,7 +553,7 @@ def main() -> None:
         print("⏭️ [Reuniões] Ignorado (RUN_REUNIOES=0)")
 
     # -------------------------
-    # YOUTUBE (filtro Plataforma + Origem + ícone)
+    # YOUTUBE (mantém como está no seu fluxo atual)
     # -------------------------
     if RUN_YOUTUBE:
         src = require_env("DATABASE_ID_YOUTUBE")
@@ -565,6 +586,38 @@ def main() -> None:
         )
     else:
         print("⏭️ [YouTube] Ignorado (RUN_YOUTUBE=0)")
+
+    # -------------------------
+    # CALENDÁRIO EDITORIAL (NOVO)
+    # -------------------------
+    if RUN_CALENDARIOEDITORIAL:
+        src = require_env("DATABASE_ID_CALENDARIOEDITORIAL")
+        dst = require_env("DATABASE_ID_CALENDARIOEDITORIAL_ESPELHO")
+
+        src = resolve_database_id(src, "Calendário Editorial/origem")
+        dst = resolve_database_id(dst, "Calendário Editorial/espelho")
+
+        mirror_database(
+            name="CalendarioEditorial",
+            source_db_id=src,
+            mirror_db_id=dst,
+            include_only_props=[
+                "Título",
+                "Veiculação",
+                "Plataforma",
+                "Status",
+                "Formato",
+                "Editoria",
+                "Links do post",
+                "Origem",
+            ],
+            date_property_name="Veiculação",
+            date_from=DATE_FROM,
+            sort_by_date=True,
+            force_origin_relation_prop="Origem",
+        )
+    else:
+        print("⏭️ [Calendário Editorial] Ignorado (RUN_CALENDARIOEDITORIAL=0)")
 
 
 if __name__ == "__main__":
