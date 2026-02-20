@@ -4,8 +4,7 @@
 """
 sync_espelho.py — Um único script para espelhar múltiplas bases no Notion
 
-✅ Atualização (Reuniões)
-- Reuniões agora NÃO copia tudo.
+✅ Reuniões
 - Copia SOMENTE: Evento, Data, Local, Status, Participantes e Origem.
 - Participantes: se na origem for "people" e no espelho for "rich_text",
   converte para texto "Nome 1, Nome 2, ...".
@@ -13,10 +12,14 @@ sync_espelho.py — Um único script para espelhar múltiplas bases no Notion
   desde que a propriedade "Origem" no espelho seja do tipo relation e esteja ligada
   ao DB original de Reuniões.
 
-✅ Atualização (YouTube)
+✅ YouTube
 - Copia: Título, Veiculação - YouTube, Status - YouTube e Origem.
 - Filtra a origem pela propriedade multi_select "Plataforma" que contenha "YouTube".
-- Usa date_from (DATE_FROM) com a mesma lógica (on_or_after) via date_property_name.
+- Usa DATE_FROM (on_or_after) com base em "Veiculação - YouTube".
+
+✅ Ícones
+- Copia o ícone da página (emoji/external; file vira external quando possível)
+- Aplica no create e no update do espelho
 
 ⚠️ Importante (Incremental)
 - Para rodar incremental de verdade, configure:
@@ -39,15 +42,13 @@ BASE_URL = "https://api.notion.com/v1"
 
 STATE_DIR = ".state"
 
-# Seleção do que roda (por padrão, só YouTube)
 RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
 
-# Segurança / teste
-MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"   # se 1, não cria/atualiza
-MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())         # 0 = sem limite; >0 limita itens
+MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1
+"
+MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())
 
-# Execução
 MIRROR_FORCE_FULL_SYNC = os.getenv("MIRROR_FORCE_FULL_SYNC", "1").strip() == "1"
 MIRROR_INCREMENTAL = os.getenv("MIRROR_INCREMENTAL", "0").strip() == "1"
 MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
@@ -55,7 +56,6 @@ MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
 MIRROR_SLEEP_MS = int(os.getenv("MIRROR_SLEEP_MS", "150").strip())
 SLEEP_SEC = max(0, MIRROR_SLEEP_MS) / 1000.0
 
-# A partir de 2026
 DATE_FROM = "2026-01-01"
 
 # =========================
@@ -158,7 +158,7 @@ def save_state(mirror_name: str, state: Dict[str, Any]) -> None:
 
 
 # =========================
-# Utilitários Notion props
+# Utilitários Notion props + icon
 # =========================
 READ_ONLY_TYPES = {
     "formula",
@@ -191,11 +191,32 @@ def plain_text_from_people(prop: Dict[str, Any]) -> str:
     return ", ".join(names)
 
 
+def sanitize_icon(icon: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Retorna um icon compatível para escrita.
+    - emoji: ok
+    - external: ok
+    - file: tenta converter para external (url pode expirar; em geral funciona)
+    """
+    if not icon:
+        return None
+
+    t = icon.get("type")
+    if t == "emoji" and icon.get("emoji"):
+        return {"type": "emoji", "emoji": icon["emoji"]}
+
+    if t == "external" and icon.get("external", {}).get("url"):
+        return {"type": "external", "external": {"url": icon["external"]["url"]}}
+
+    if t == "file":
+        url = (icon.get("file") or {}).get("url")
+        if url:
+            return {"type": "external", "external": {"url": url}}
+
+    return None
+
+
 def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Converte uma propriedade da API (origem) para payload de escrita (destino).
-    Retorna None para tipos não graváveis.
-    """
     if not prop:
         return None
     t = prop.get("type")
@@ -251,19 +272,9 @@ def build_dest_properties(
     mirror_db_schema: Optional[Dict[str, Any]] = None,
     force_origin_relation_prop: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Monta o payload de properties a escrever no destino.
-
-    - include_only_props: whitelist de nomes de propriedades.
-    - mirror_db_schema: schema do DB destino para permitir conversões (ex.: people->rich_text).
-    - force_origin_relation_prop:
-        se informado (ex.: "Origem"), força escrever relation apontando para source_id
-        (útil para manter vínculo com o item original).
-    """
     src_props = source_page.get("properties", {}) or {}
     dest: Dict[str, Any] = {}
 
-    # Mapa do schema do destino: nome -> tipo
     dest_prop_types: Dict[str, str] = {}
     if mirror_db_schema:
         for pname, pdef in (mirror_db_schema.get("properties", {}) or {}).items():
@@ -275,7 +286,6 @@ def build_dest_properties(
         if include_only_props is not None and prop_name not in include_only_props:
             continue
 
-        # Conversão especial: origem people -> destino rich_text (ex.: "Participantes")
         if prop.get("type") == "people" and dest_prop_types.get(prop_name) == "rich_text":
             txt = plain_text_from_people(prop)
             dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
@@ -285,7 +295,6 @@ def build_dest_properties(
         if payload is not None:
             dest[prop_name] = payload
 
-    # Força a relação "Origem" no espelho apontando para o source_id
     if include_only_props is not None and force_origin_relation_prop:
         if force_origin_relation_prop in include_only_props:
             if dest_prop_types.get(force_origin_relation_prop) == "relation":
@@ -309,8 +318,6 @@ def query_database_pages(
     url = f"{BASE_URL}/databases/{db_id}/query"
 
     filters: List[Dict[str, Any]] = []
-
-    # filtros adicionais (ex.: Plataforma contém YouTube)
     if extra_filters:
         filters.extend(extra_filters)
 
@@ -348,18 +355,32 @@ def query_database_pages(
 
 
 # =========================
-# Upsert
+# Upsert (com icon)
 # =========================
-def create_page_in_mirror(mirror_db_id: str, properties: Dict[str, Any]) -> str:
+def create_page_in_mirror(
+    mirror_db_id: str,
+    properties: Dict[str, Any],
+    *,
+    icon: Optional[Dict[str, Any]] = None,
+) -> str:
     url = f"{BASE_URL}/pages"
-    payload = {"parent": {"database_id": mirror_db_id}, "properties": properties}
+    payload: Dict[str, Any] = {"parent": {"database_id": mirror_db_id}, "properties": properties}
+    if icon:
+        payload["icon"] = icon
     data = http_post(url, payload)
     return data["id"]
 
 
-def update_page_in_mirror(page_id: str, properties: Dict[str, Any]) -> None:
+def update_page_in_mirror(
+    page_id: str,
+    properties: Dict[str, Any],
+    *,
+    icon: Optional[Dict[str, Any]] = None,
+) -> None:
     url = f"{BASE_URL}/pages/{page_id}"
-    payload = {"properties": properties}
+    payload: Dict[str, Any] = {"properties": properties}
+    if icon:
+        payload["icon"] = icon
     http_patch(url, payload)
 
 
@@ -432,14 +453,16 @@ def mirror_database(
                 force_origin_relation_prop=force_origin_relation_prop,
             )
 
+            icon = sanitize_icon(page.get("icon"))
+
             if MIRROR_DRY_RUN:
                 continue
 
             if source_id in mappings:
-                update_page_in_mirror(mappings[source_id], props)
+                update_page_in_mirror(mappings[source_id], props, icon=icon)
                 updated += 1
             else:
-                mirror_id = create_page_in_mirror(mirror_db_id, props)
+                mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
                 mappings[source_id] = mirror_id
                 created += 1
 
@@ -483,7 +506,7 @@ def main() -> None:
     require_env("NOTION_API_KEY")
 
     # -------------------------
-    # REUNIÕES  (NÃO MEXER)
+    # REUNIÕES (não mexer)
     # -------------------------
     if RUN_REUNIOES:
         src = require_env("DATABASE_ID_REUNIOES")
@@ -507,7 +530,7 @@ def main() -> None:
         print("⏭️ [Reuniões] Ignorado (RUN_REUNIOES=0)")
 
     # -------------------------
-    # YOUTUBE (ATUALIZADO)
+    # YOUTUBE (filtro Plataforma + Origem + ícone)
     # -------------------------
     if RUN_YOUTUBE:
         src = require_env("DATABASE_ID_YOUTUBE")
@@ -516,7 +539,6 @@ def main() -> None:
         src = resolve_database_id(src, "YouTube/origem")
         dst = resolve_database_id(dst, "YouTube/espelho")
 
-        # Filtro: Plataforma (multi_select) contém "YouTube"
         youtube_platform_filter = [
             {"property": "Plataforma", "multi_select": {"contains": "YouTube"}}
         ]
