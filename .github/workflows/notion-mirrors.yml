@@ -61,14 +61,18 @@ jobs:
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
           DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
 
+          DATABASE_ID_TAREFAS_GCMD: ${{ secrets.DATABASE_ID_TAREFAS_GCMD }}
+          DATABASE_ID_TAREFAS_GCMD_ESPELHO: ${{ secrets.DATABASE_ID_TAREFAS_GCMD_ESPELHO }}
+
           # ==================================================
           # 🎛️ CONTROLES (CHAVE DO COMPORTAMENTO)
           # ==================================================
 
           # "1" = roda | "0" = ignora completamente
-          RUN_YOUTUBE: "1"
-          RUN_REUNIOES: "1"
-          RUN_CALENDARIOEDITORIAL: "1"
+          RUN_YOUTUBE: "0"
+          RUN_REUNIOES: "0"
+          RUN_CALENDARIOEDITORIAL: "0"
+          RUN_TAREFAS_GCMD: "1"
 
           # ==================================================
           # 🧪 OPCIONAIS DE TESTE / SEGURANÇA
