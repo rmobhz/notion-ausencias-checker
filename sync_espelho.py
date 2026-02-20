@@ -220,6 +220,23 @@ def sanitize_icon(icon: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
     return None
 
+MAX_NOTION_TEXT = 2000
+
+def rich_text_chunks(text: str, max_len: int = MAX_NOTION_TEXT) -> List[Dict[str, Any]]:
+    """
+    Divide um texto grande em vários blocos rich_text.
+    O Notion limita text.content a 2000 por item.
+    """
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    while start < len(text):
+        part = text[start:start + max_len]
+        chunks.append({"type": "text", "text": {"content": part}})
+        start += max_len
+    return chunks
+
 
 def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not prop:
@@ -234,7 +251,7 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if t == "rich_text":
         text = plain_text_from_rich(prop)
-        return {"rich_text": [{"type": "text", "text": {"content": text}}]} if text else {"rich_text": []}
+        return {"rich_text": rich_text_chunks(text)} if text else {"rich_text": []}
 
     if t == "number":
         return {"number": prop.get("number")}
