@@ -21,6 +21,7 @@ STATE_DIR = ".state"
 RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
 RUN_CALENDARIOEDITORIAL = os.getenv("RUN_CALENDARIOEDITORIAL", "0").strip() == "1"
+RUN_TAREFAS_GCMD = os.getenv("RUN_TAREFAS_GCMD", "0").strip() == "1"
 
 # Segurança / teste
 MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"
