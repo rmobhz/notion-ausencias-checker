@@ -230,11 +230,14 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"rich_text": [{"type": "text", "text": {"content": text}}]} if text else {"rich_text": []}
     if t == "number":
         return {"number": prop.get("number")}
-    if t == "select":
+        if t == "select":
         sel = prop.get("select")
-        return {"select": sel} if sel else {"select": None}
+        # ✅ Escreve por NOME (IDs não batem entre DBs)
+        return {"select": {"name": sel.get("name")}} if sel and sel.get("name") else {"select": None}
     if t == "multi_select":
-        return {"multi_select": prop.get("multi_select", [])}
+        ms = prop.get("multi_select", []) or []
+        # ✅ Escreve por NOME (IDs não batem entre DBs)
+        return {"multi_select": [{"name": o.get("name")} for o in ms if o.get("name")]}
     if t == "status":
         st = prop.get("status")
         return {"status": {"name": st.get("name")}} if st and st.get("name") else {"status": None}
