@@ -55,6 +55,9 @@ jobs:
           DATABASE_ID_YOUTUBE: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
           DATABASE_ID_YOUTUBE_ESPELHO: ${{ secrets.DATABASE_ID_YOUTUBE_ESPELHO }}
 
+          DATABASE_ID_CALENDARIOEDITORIAL: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
+          DATABASE_ID_CALENDARIOEDITORIAL_ESPELHO: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL_ESPELHO }}
+
           DATABASE_ID_REUNIOES: ${{ secrets.DATABASE_ID_REUNIOES }}
           DATABASE_ID_REUNIOES_ESPELHO: ${{ secrets.DATABASE_ID_REUNIOES_ESPELHO }}
 
@@ -63,8 +66,9 @@ jobs:
           # ==================================================
 
           # "1" = roda | "0" = ignora completamente
-          RUN_YOUTUBE: "1"
+          RUN_YOUTUBE: "0"
           RUN_REUNIOES: "0"
+          RUN_CALENDARIOEDITORIAL: "1"
 
           # ==================================================
           # 🧪 OPCIONAIS DE TESTE / SEGURANÇA
