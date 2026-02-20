@@ -8,10 +8,15 @@ sync_espelho.py — Um único script para espelhar múltiplas bases no Notion
 - Reuniões agora NÃO copia tudo.
 - Copia SOMENTE: Evento, Data, Local, Status, Participantes e Origem.
 - Participantes: se na origem for "people" e no espelho for "rich_text",
-  converte para texto "Nome 1 | Nome 2 | ...".
+  converte para texto "Nome 1, Nome 2, ...".
 - Origem: força a relação do espelho apontando para a página original (source_id),
   desde que a propriedade "Origem" no espelho seja do tipo relation e esteja ligada
   ao DB original de Reuniões.
+
+✅ Atualização (YouTube)
+- Copia: Título, Veiculação - YouTube, Status - YouTube e Origem.
+- Filtra a origem pela propriedade multi_select "Plataforma" que contenha "YouTube".
+- Usa date_from (DATE_FROM) com a mesma lógica (on_or_after) via date_property_name.
 
 ⚠️ Importante (Incremental)
 - Para rodar incremental de verdade, configure:
@@ -283,7 +288,6 @@ def build_dest_properties(
     # Força a relação "Origem" no espelho apontando para o source_id
     if include_only_props is not None and force_origin_relation_prop:
         if force_origin_relation_prop in include_only_props:
-            # Só escreve se no destino a prop existir e for relation; se não, deixa claro no log depois (via erro do Notion)
             if dest_prop_types.get(force_origin_relation_prop) == "relation":
                 dest[force_origin_relation_prop] = {"relation": [{"id": source_page["id"]}]}
 
@@ -291,7 +295,7 @@ def build_dest_properties(
 
 
 # =========================
-# Query com filtro de data (>= 2026-01-01)
+# Query com filtro de data (>= DATE_FROM)
 # =========================
 def query_database_pages(
     db_id: str,
@@ -299,10 +303,16 @@ def query_database_pages(
     date_from: str,
     incremental_after: Optional[str],
     sorts: Optional[List[Dict[str, Any]]],
+    *,
+    extra_filters: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     url = f"{BASE_URL}/databases/{db_id}/query"
 
     filters: List[Dict[str, Any]] = []
+
+    # filtros adicionais (ex.: Plataforma contém YouTube)
+    if extra_filters:
+        filters.extend(extra_filters)
 
     if date_property_name:
         filters.append({"property": date_property_name, "date": {"on_or_after": date_from}})
@@ -367,6 +377,7 @@ def mirror_database(
     date_from: str,
     sort_by_date: bool = True,
     force_origin_relation_prop: Optional[str] = None,
+    extra_filters: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     state = load_state(name)
     mappings: Dict[str, str] = state.get("mappings", {}) or {}
@@ -379,7 +390,6 @@ def mirror_database(
     if sort_by_date and date_property_name:
         sorts = [{"property": date_property_name, "direction": "ascending"}]
 
-    # Schema do destino para suportar conversões (people->rich_text, e validar Origem relation)
     mirror_schema = get_database_schema(mirror_db_id)
 
     pages = query_database_pages(
@@ -388,6 +398,7 @@ def mirror_database(
         date_from=date_from,
         incremental_after=incremental_after,
         sorts=sorts,
+        extra_filters=extra_filters,
     )
 
     mode = "DRY_RUN" if MIRROR_DRY_RUN else ("FULL" if MIRROR_FORCE_FULL_SYNC or not MIRROR_INCREMENTAL else "INCR")
@@ -397,7 +408,6 @@ def mirror_database(
         + (f" | incremental_after={incremental_after}" if incremental_after else "")
     )
 
-    # limita itens (modo teste)
     if MIRROR_LIMIT and MIRROR_LIMIT > 0:
         pages = pages[:MIRROR_LIMIT]
         print(f"🧪 [{name}] MIRROR_LIMIT ativo: processando somente {len(pages)} itens")
@@ -423,7 +433,7 @@ def mirror_database(
             )
 
             if MIRROR_DRY_RUN:
-                continue  # não grava nem altera estado
+                continue
 
             if source_id in mappings:
                 update_page_in_mirror(mappings[source_id], props)
@@ -451,7 +461,6 @@ def mirror_database(
         print(f"✅ [{name}] DRY_RUN finalizado | Itens analisados={len(pages)} | SkippedArchived={skipped_archived} | Erros={errors}")
         return
 
-    # checkpoint final
     state["mappings"] = mappings
     if MIRROR_INCREMENTAL and not MIRROR_FORCE_FULL_SYNC:
         state["last_sync_time"] = now_iso_z()
@@ -474,19 +483,16 @@ def main() -> None:
     require_env("NOTION_API_KEY")
 
     # -------------------------
-    # REUNIÕES
+    # REUNIÕES  (NÃO MEXER)
     # -------------------------
     if RUN_REUNIOES:
         src = require_env("DATABASE_ID_REUNIOES")
         dst = require_env("DATABASE_ID_REUNIOES_ESPELHO")
         REUNIOES_DATE_PROP = os.getenv("REUNIOES_DATE_PROP", "Data")
 
-        # Resolve IDs caso alguém tenha passado PAGE ID
         src = resolve_database_id(src, "Reuniões/origem")
         dst = resolve_database_id(dst, "Reuniões/espelho")
 
-        # ✅ Só publica um subconjunto de props
-        # Obs.: "Origem" aqui é a relation no espelho que aponta para a página original (source_id).
         mirror_database(
             name="Reuniões",
             source_db_id=src,
@@ -501,7 +507,7 @@ def main() -> None:
         print("⏭️ [Reuniões] Ignorado (RUN_REUNIOES=0)")
 
     # -------------------------
-    # YOUTUBE
+    # YOUTUBE (ATUALIZADO)
     # -------------------------
     if RUN_YOUTUBE:
         src = require_env("DATABASE_ID_YOUTUBE")
@@ -510,14 +516,21 @@ def main() -> None:
         src = resolve_database_id(src, "YouTube/origem")
         dst = resolve_database_id(dst, "YouTube/espelho")
 
+        # Filtro: Plataforma (multi_select) contém "YouTube"
+        youtube_platform_filter = [
+            {"property": "Plataforma", "multi_select": {"contains": "YouTube"}}
+        ]
+
         mirror_database(
             name="YouTube",
             source_db_id=src,
             mirror_db_id=dst,
-            include_only_props=["Título", "Veiculação - YouTube", "Status - YouTube"],
+            include_only_props=["Título", "Veiculação - YouTube", "Status - YouTube", "Origem"],
             date_property_name="Veiculação - YouTube",
             date_from=DATE_FROM,
             sort_by_date=True,
+            force_origin_relation_prop="Origem",
+            extra_filters=youtube_platform_filter,
         )
     else:
         print("⏭️ [YouTube] Ignorado (RUN_YOUTUBE=0)")
