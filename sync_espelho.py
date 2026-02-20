@@ -230,7 +230,7 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return {"rich_text": [{"type": "text", "text": {"content": text}}]} if text else {"rich_text": []}
     if t == "number":
         return {"number": prop.get("number")}
-        if t == "select":
+    if t == "select":
         sel = prop.get("select")
         # ✅ Escreve por NOME (IDs não batem entre DBs)
         return {"select": {"name": sel.get("name")}} if sel and sel.get("name") else {"select": None}
