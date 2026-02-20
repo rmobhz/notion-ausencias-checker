@@ -45,8 +45,7 @@ STATE_DIR = ".state"
 RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
 
-MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1
-"
+MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"
 MIRROR_LIMIT = int(os.getenv("MIRROR_LIMIT", "0").strip())
 
 MIRROR_FORCE_FULL_SYNC = os.getenv("MIRROR_FORCE_FULL_SYNC", "1").strip() == "1"
