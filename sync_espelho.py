@@ -619,6 +619,37 @@ def main() -> None:
     else:
         print("⏭️ [Calendário Editorial] Ignorado (RUN_CALENDARIOEDITORIAL=0)")
 
+    # -------------------------
+    # TAREFAS GCMD
+    # -------------------------
+    if RUN_TAREFAS_GCMD:
+        src = require_env("DATABASE_ID_TAREFAS_GCMD")
+        dst = require_env("DATABASE_ID_TAREFAS_GCMD_ESPELHO")
+
+        src = resolve_database_id(src, "Tarefas GCMD/origem")
+        dst = resolve_database_id(dst, "Tarefas GCMD/espelho")
+
+        mirror_database(
+            name="Tarefas_GCMD",
+            source_db_id=src,
+            mirror_db_id=dst,
+            include_only_props=[
+                "Atividade",
+                "Responsável",
+                "Apoio",
+                "Descrição",
+                "Categoria",
+                "Status",
+                "Origem",
+            ],
+            date_property_name=None,  # tarefas não são filtradas por data
+            date_from=DATE_FROM,      # ignorado quando date_property_name=None
+            sort_by_date=False,
+            force_origin_relation_prop="Origem",
+        )
+    else:
+        print("⏭️ [Tarefas GCMD] Ignorado (RUN_TAREFAS_GCMD=0)")
+
 
 if __name__ == "__main__":
     main()
