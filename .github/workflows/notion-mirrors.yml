@@ -72,10 +72,10 @@ jobs:
           # ==================================================
 
           # "1" = roda | "0" = ignora completamente
-          RUN_YOUTUBE: "0"
-          RUN_REUNIOES: "0"
-          RUN_CALENDARIOEDITORIAL: "0"
-          RUN_TAREFAS_GCMD: "0"
+          RUN_YOUTUBE: "1"
+          RUN_REUNIOES: "1"
+          RUN_CALENDARIOEDITORIAL: "1"
+          RUN_TAREFAS_GCMD: "1"
           RUN_CONTROLE_DEMANDAS: "1"
 
           # ==================================================
@@ -96,10 +96,10 @@ jobs:
           # ==================================================
 
           # Força FULL SYNC (ignora incremental)
-          MIRROR_FORCE_FULL_SYNC: "1"
+          # MIRROR_FORCE_FULL_SYNC: "1"
 
           # Tenta incremental se o script suportar
-          MIRROR_INCREMENTAL: "0"
+          MIRROR_INCREMENTAL: "1"
 
       - name: Salvar estado do espelho (.state)
         if: always()
