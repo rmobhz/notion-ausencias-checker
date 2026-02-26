@@ -22,6 +22,7 @@ RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
 RUN_CALENDARIOEDITORIAL = os.getenv("RUN_CALENDARIOEDITORIAL", "0").strip() == "1"
 RUN_TAREFAS_GCMD = os.getenv("RUN_TAREFAS_GCMD", "0").strip() == "1"
+RUN_CONTROLE_DEMANDAS = os.getenv("RUN_CONTROLE_DEMANDAS", "0").strip() == "1"
 
 # Segurança / teste
 MIRROR_DRY_RUN = os.getenv("MIRROR_DRY_RUN", "0").strip() == "1"
@@ -668,6 +669,41 @@ def main() -> None:
         )
     else:
         print("⏭️ [Tarefas GCMD] Ignorado (RUN_TAREFAS_GCMD=0)")
+
+    
+    # -------------------------
+    # CONTROLE DEMANDAS       
+    # -------------------------
+    if RUN_CONTROLE_DEMANDAS:
+        src = require_env("DATABASE_ID_CONTROLE_DEMANDAS")
+        dst = require_env("DATABASE_ID_CONTROLE_DEMANDAS_ESPELHO")
+
+        src = resolve_database_id(src, "Controle Demandas/origem")
+        dst = resolve_database_id(dst, "Controle Demandas/espelho")
+
+        mirror_database(
+            name="Controle_Demandas",
+            source_db_id=src,
+            mirror_db_id=dst,
+            include_only_props=[
+                "Descrição",
+                "Nº ID",
+                "Recebimento",
+                "Recebimento de insumos",
+                "Área solicitante",
+                "Ação",          # rollup -> vira texto no espelho (se destino for rich_text)
+                "Responsável",   # people -> vira texto no espelho (se destino for rich_text)
+                "Tarefa",        # rollup -> vira texto no espelho (se destino for rich_text)
+                "Origem",        # relation forçado para a página de origem
+            ],
+            date_property_name="Recebimento",
+            date_from=DATE_FROM,  # ✅ usando a variável
+            sort_by_date=True,
+            force_origin_relation_prop="Origem",
+            extra_filters=None,   # ✅ sem filtro adicional
+        )
+    else:
+        print("⏭️ [Controle Demandas] Ignorado (RUN_CONTROLE_DEMANDAS=0)")
 
 
 if __name__ == "__main__":
