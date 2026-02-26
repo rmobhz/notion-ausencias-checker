@@ -203,6 +203,86 @@ def plain_text_from_people(prop: Dict[str, Any]) -> str:
     return ", ".join(names)
 
 
+def plain_text_from_rollup(prop: Dict[str, Any]) -> str:
+    """
+    Converte rollup em texto (para copiar em prop de texto no espelho).
+    Suporta: number/date/array (title/rich_text/select/multi_select/status/people/number/date/etc.)
+    """
+    roll = prop.get("rollup") or {}
+    rt = roll.get("type")
+
+    if rt == "number":
+        v = roll.get("number")
+        return "" if v is None else str(v)
+
+    if rt == "date":
+        d = roll.get("date") or {}
+        start = d.get("start") or ""
+        end = d.get("end")
+        return f"{start} → {end}" if (start and end) else (start or "")
+
+    if rt == "array":
+        arr = roll.get("array", []) or []
+        parts: List[str] = []
+
+        for item in arr:
+            it = item.get("type")
+
+            if it == "title":
+                parts.append("".join([x.get("plain_text", "") for x in item.get("title", [])]))
+
+            elif it == "rich_text":
+                parts.append("".join([x.get("plain_text", "") for x in item.get("rich_text", [])]))
+
+            elif it == "people":
+                ppl = item.get("people", []) or []
+                names = [p.get("name", "").strip() for p in ppl if p.get("name")]
+                parts.append(", ".join(names))
+
+            elif it == "select":
+                sel = item.get("select") or {}
+                parts.append(sel.get("name") or "")
+
+            elif it == "multi_select":
+                ms = item.get("multi_select", []) or []
+                parts.append(", ".join([o.get("name") for o in ms if o.get("name")]))
+
+            elif it == "status":
+                st = item.get("status") or {}
+                parts.append(st.get("name") or "")
+
+            elif it == "number":
+                v = item.get("number")
+                parts.append("" if v is None else str(v))
+
+            elif it == "date":
+                d = item.get("date") or {}
+                s = d.get("start") or ""
+                e = d.get("end")
+                parts.append(f"{s} → {e}" if (s and e) else (s or ""))
+
+            elif it == "checkbox":
+                parts.append("Sim" if item.get("checkbox") else "Não")
+
+            elif it == "url":
+                parts.append(item.get("url") or "")
+
+            elif it == "email":
+                parts.append(item.get("email") or "")
+
+            elif it == "phone_number":
+                parts.append(item.get("phone_number") or "")
+
+            else:
+                if "plain_text" in item:
+                    parts.append(item.get("plain_text") or "")
+
+        parts = [p.strip() for p in parts if p and p.strip()]
+        return ", ".join(parts)
+
+    return ""
+
+
 def sanitize_icon(icon: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not icon:
         return None
@@ -221,7 +301,9 @@ def sanitize_icon(icon: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
     return None
 
+
 MAX_NOTION_TEXT = 1900  # margem contra contagem diferente (unicode/emojis)
+
 
 def rich_text_chunks(text: str, max_len: int = MAX_NOTION_TEXT) -> List[Dict[str, Any]]:
     """
@@ -260,17 +342,14 @@ def build_property_payload(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     if t == "select":
         sel = prop.get("select")
-        # ✅ Escrever por NOME (IDs não batem entre DBs)
         return {"select": {"name": sel.get("name")}} if sel and sel.get("name") else {"select": None}
 
     if t == "multi_select":
         ms = prop.get("multi_select", []) or []
-        # ✅ Escrever por NOME (IDs não batem entre DBs)
         return {"multi_select": [{"name": o.get("name")} for o in ms if o.get("name")]}
 
     if t == "status":
         st = prop.get("status")
-        # status também aceita name, mas o destino precisa ter a opção configurada (recomendado)
         return {"status": {"name": st.get("name")}} if st and st.get("name") else {"status": None}
 
     if t == "date":
@@ -327,9 +406,18 @@ def build_dest_properties(
         if include_only_props is not None and prop_name not in include_only_props:
             continue
 
-        # Conversão people -> rich_text (quando o espelho tem texto)
-        if prop.get("type") == "people" and dest_prop_types.get(prop_name) == "rich_text":
+        src_type = prop.get("type")
+        dst_type = dest_prop_types.get(prop_name)
+
+        # people -> rich_text (quando o espelho tem texto)
+        if src_type == "people" and dst_type == "rich_text":
             txt = plain_text_from_people(prop)
+            dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
+            continue
+
+        # ✅ rollup -> rich_text (quando o espelho tem texto)
+        if src_type == "rollup" and dst_type == "rich_text":
+            txt = plain_text_from_rollup(prop)
             dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
             continue
 
@@ -484,13 +572,6 @@ def mirror_database(
     for i, page in enumerate(pages, start=1):
         source_id = page["id"]
 
-        # DEBUG TEMPORÁRIO – Controle Demandas
-        if name == "Controle_Demandas" and i == 1:
-            ap = page.get("properties", {}).get("Ação")
-            tp = page.get("properties", {}).get("Tarefa")
-            print("DEBUG Ação:", json.dumps(ap, ensure_ascii=False)[:1500])
-            print("DEBUG Tarefa:", json.dumps(tp, ensure_ascii=False)[:1500])
-
         if is_archived(page) and not MIRROR_UPDATE_ARCHIVED:
             skipped_archived += 1
             continue
@@ -514,7 +595,7 @@ def mirror_database(
                     updated += 1
                 except Exception as e:
                     msg = str(e).lower()
-            
+
                     # Se o item do espelho foi arquivado/apagado/inacessível, recria e corrige o mapping
                     if ("can't edit block that is archived" in msg) or ("archived" in msg) or ("object_not_found" in msg):
                         old = mappings.get(source_id)
@@ -690,9 +771,8 @@ def main() -> None:
     else:
         print("⏭️ [Tarefas GCMD] Ignorado (RUN_TAREFAS_GCMD=0)")
 
-    
     # -------------------------
-    # CONTROLE DEMANDAS       
+    # CONTROLE DEMANDAS
     # -------------------------
     if RUN_CONTROLE_DEMANDAS:
         src = require_env("DATABASE_ID_CONTROLE_DEMANDAS")
@@ -711,16 +791,16 @@ def main() -> None:
                 "Recebimento",
                 "Recebimento de insumos",
                 "Área solicitante",
-                "Ação",          # rollup -> vira texto no espelho (se destino for rich_text)
-                "Responsável",   # people -> vira texto no espelho (se destino for rich_text)
-                "Tarefa",        # rollup -> vira texto no espelho (se destino for rich_text)
-                "Origem",        # relation forçado para a página de origem
+                "Ação",
+                "Responsável",
+                "Tarefa",
+                "Origem",
             ],
             date_property_name="Recebimento",
-            date_from=DATE_FROM,  # ✅ usando a variável
+            date_from=DATE_FROM,
             sort_by_date=True,
             force_origin_relation_prop="Origem",
-            extra_filters=None,   # ✅ sem filtro adicional
+            extra_filters=None,
         )
     else:
         print("⏭️ [Controle Demandas] Ignorado (RUN_CONTROLE_DEMANDAS=0)")
