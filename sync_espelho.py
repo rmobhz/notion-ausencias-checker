@@ -484,6 +484,13 @@ def mirror_database(
     for i, page in enumerate(pages, start=1):
         source_id = page["id"]
 
+        # DEBUG TEMPORÁRIO – Controle Demandas
+        if name == "Controle_Demandas" and i == 1:
+            ap = page.get("properties", {}).get("Ação")
+            tp = page.get("properties", {}).get("Tarefa")
+            print("DEBUG Ação:", json.dumps(ap, ensure_ascii=False)[:1500])
+            print("DEBUG Tarefa:", json.dumps(tp, ensure_ascii=False)[:1500])
+
         if is_archived(page) and not MIRROR_UPDATE_ARCHIVED:
             skipped_archived += 1
             continue
