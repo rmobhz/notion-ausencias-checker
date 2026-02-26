@@ -96,10 +96,14 @@ jobs:
           # ==================================================
 
           # Força FULL SYNC (ignora incremental)
-          # MIRROR_FORCE_FULL_SYNC: "1"
+          MIRROR_FORCE_FULL_SYNC: "1"
 
           # Tenta incremental se o script suportar
-          MIRROR_INCREMENTAL: "1"
+          MIRROR_INCREMENTAL: "0"
+
+          # Arquiva/desarquiva itens no espelho
+          MIRROR_RECONCILE: "1"
+          MIRROR_RECONCILE_MODE: "archive"
 
       - name: Salvar estado do espelho (.state)
         if: always()
