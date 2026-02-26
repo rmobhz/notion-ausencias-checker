@@ -33,6 +33,10 @@ MIRROR_FORCE_FULL_SYNC = os.getenv("MIRROR_FORCE_FULL_SYNC", "1").strip() == "1"
 MIRROR_INCREMENTAL = os.getenv("MIRROR_INCREMENTAL", "0").strip() == "1"
 MIRROR_UPDATE_ARCHIVED = os.getenv("MIRROR_UPDATE_ARCHIVED", "1").strip() == "1"
 
+# Reconciliação do espelho (Estratégia B)
+MIRROR_RECONCILE = os.getenv("MIRROR_RECONCILE", "0").strip() == "1"
+MIRROR_RECONCILE_MODE = os.getenv("MIRROR_RECONCILE_MODE", "archive").strip().lower()  # archive
+
 MIRROR_SLEEP_MS = int(os.getenv("MIRROR_SLEEP_MS", "150").strip())
 SLEEP_SEC = max(0, MIRROR_SLEEP_MS) / 1000.0
 
@@ -56,7 +60,12 @@ def notion_headers() -> Dict[str, str]:
     }
 
 
-def request_with_retry(method: str, url: str, payload: Optional[Dict[str, Any]] = None, max_attempts: int = 6) -> Dict[str, Any]:
+def request_with_retry(
+    method: str,
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    max_attempts: int = 6
+) -> Dict[str, Any]:
     for attempt in range(1, max_attempts + 1):
         try:
             if method == "GET":
@@ -198,9 +207,8 @@ def plain_text_from_title(prop: Dict[str, Any]) -> str:
 
 def plain_text_from_people(prop: Dict[str, Any]) -> str:
     ppl = prop.get("people", []) or []
-    names = [p.get("name", "").strip() for p in ppl]
-    names = [n for n in names if n]
-    return ", ".join(names)
+    names = [p.get("name", "").strip() for p in ppl if p.get("name")]
+    return ", ".join([n for n in names if n])
 
 
 def plain_text_from_rollup(prop: Dict[str, Any]) -> str:
@@ -237,7 +245,7 @@ def plain_text_from_rollup(prop: Dict[str, Any]) -> str:
             elif it == "people":
                 ppl = item.get("people", []) or []
                 names = [p.get("name", "").strip() for p in ppl if p.get("name")]
-                parts.append(", ".join(names))
+                parts.append(", ".join([n for n in names if n]))
 
             elif it == "select":
                 sel = item.get("select") or {}
@@ -306,11 +314,6 @@ MAX_NOTION_TEXT = 1900  # margem contra contagem diferente (unicode/emojis)
 
 
 def rich_text_chunks(text: str, max_len: int = MAX_NOTION_TEXT) -> List[Dict[str, Any]]:
-    """
-    Divide um texto grande em vários blocos rich_text.
-    Notion valida limite ~2000 por bloco, mas pode contar diferente com unicode.
-    Usamos 1900 para evitar 400.
-    """
     if not text:
         return []
     chunks = []
@@ -415,7 +418,7 @@ def build_dest_properties(
             dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
             continue
 
-        # ✅ rollup -> rich_text (quando o espelho tem texto)
+        # rollup -> rich_text (quando o espelho tem texto)
         if src_type == "rollup" and dst_type == "rich_text":
             txt = plain_text_from_rollup(prop)
             dest[prop_name] = {"rich_text": [{"type": "text", "text": {"content": txt}}]} if txt else {"rich_text": []}
@@ -486,7 +489,7 @@ def query_database_pages(
 
 
 # =========================
-# Upsert (com icon)
+# Upsert (com icon) + archived toggle
 # =========================
 def create_page_in_mirror(
     mirror_db_id: str,
@@ -513,6 +516,11 @@ def update_page_in_mirror(
     if icon:
         payload["icon"] = icon
     http_patch(url, payload)
+
+
+def set_page_archived(page_id: str, archived: bool) -> None:
+    url = f"{BASE_URL}/pages/{page_id}"
+    http_patch(url, {"archived": bool(archived)})
 
 
 def now_iso_z() -> str:
@@ -569,8 +577,12 @@ def mirror_database(
     skipped_archived = 0
     errors = 0
 
+    # Para reconciliação (FULL): ids de origem vistos nesta execução
+    seen_source_ids: set[str] = set()
+
     for i, page in enumerate(pages, start=1):
         source_id = page["id"]
+        seen_source_ids.add(source_id)
 
         if is_archived(page) and not MIRROR_UPDATE_ARCHIVED:
             skipped_archived += 1
@@ -590,21 +602,31 @@ def mirror_database(
                 continue
 
             if source_id in mappings:
+                mirror_id = mappings[source_id]
                 try:
-                    update_page_in_mirror(mappings[source_id], props, icon=icon)
+                    # Se o item do espelho estiver arquivado, desarquiva antes de atualizar
+                    update_page_in_mirror(mirror_id, props, icon=icon)
                     updated += 1
+
                 except Exception as e:
                     msg = str(e).lower()
 
-                    # Se o item do espelho foi arquivado/apagado/inacessível, recria e corrige o mapping
-                    if ("can't edit block that is archived" in msg) or ("archived" in msg) or ("object_not_found" in msg):
-                        old = mappings.get(source_id)
-                        print(f"♻️  [{name}] mapping inválido (mirror_id={old}). Recriando item no espelho...")
-                        mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
-                        mappings[source_id] = mirror_id
+                    # Caso típico: mirror arquivado -> desarquiva e tenta novamente
+                    if ("can't edit block that is archived" in msg) or ("archived" in msg):
+                        set_page_archived(mirror_id, False)
+                        update_page_in_mirror(mirror_id, props, icon=icon)
+                        updated += 1
+
+                    # Se o item não existe mais (apagado), recria e corrige mapping
+                    elif ("object_not_found" in msg):
+                        print(f"♻️  [{name}] mapping inválido (mirror_id={mirror_id}). Recriando item no espelho...")
+                        new_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
+                        mappings[source_id] = new_id
                         created += 1
+
                     else:
                         raise
+
             else:
                 mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
                 mappings[source_id] = mirror_id
@@ -628,6 +650,28 @@ def mirror_database(
         print(f"✅ [{name}] DRY_RUN finalizado | Itens analisados={len(pages)} | SkippedArchived={skipped_archived} | Erros={errors}")
         return
 
+    # =========================
+    # Reconciliação (Estratégia B): arquivar no espelho o que sumiu do escopo
+    # Só faz sentido com visão completa -> FULL
+    # =========================
+    is_full_run = (MIRROR_FORCE_FULL_SYNC or not MIRROR_INCREMENTAL)
+    if MIRROR_RECONCILE and is_full_run:
+        reconciled = 0
+        if MIRROR_RECONCILE_MODE != "archive":
+            print(f"⚠️ [{name}] MIRROR_RECONCILE_MODE inválido: {MIRROR_RECONCILE_MODE} (use 'archive')")
+        else:
+            for source_id, mirror_id in list(mappings.items()):
+                if source_id not in seen_source_ids:
+                    try:
+                        set_page_archived(mirror_id, True)
+                        reconciled += 1
+                        time.sleep(SLEEP_SEC)
+                    except Exception as e:
+                        print(f"❌ [{name}] falha ao arquivar no espelho mirror_id={mirror_id} source_id={source_id}: {e}")
+
+        if reconciled:
+            print(f"🧹 [{name}] Reconciliação: arquivados no espelho={reconciled}")
+
     state["mappings"] = mappings
     if MIRROR_INCREMENTAL and not MIRROR_FORCE_FULL_SYNC:
         state["last_sync_time"] = now_iso_z()
@@ -650,7 +694,7 @@ def main() -> None:
     require_env("NOTION_API_KEY")
 
     # -------------------------
-    # REUNIÕES (mantém como está)
+    # REUNIÕES
     # -------------------------
     if RUN_REUNIOES:
         src = require_env("DATABASE_ID_REUNIOES")
@@ -674,7 +718,7 @@ def main() -> None:
         print("⏭️ [Reuniões] Ignorado (RUN_REUNIOES=0)")
 
     # -------------------------
-    # YOUTUBE (mantém como está no seu fluxo atual)
+    # YOUTUBE
     # -------------------------
     if RUN_YOUTUBE:
         src = require_env("DATABASE_ID_YOUTUBE")
@@ -709,7 +753,7 @@ def main() -> None:
         print("⏭️ [YouTube] Ignorado (RUN_YOUTUBE=0)")
 
     # -------------------------
-    # CALENDÁRIO EDITORIAL (NOVO)
+    # CALENDÁRIO EDITORIAL
     # -------------------------
     if RUN_CALENDARIOEDITORIAL:
         src = require_env("DATABASE_ID_CALENDARIOEDITORIAL")
