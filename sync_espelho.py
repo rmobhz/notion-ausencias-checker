@@ -502,8 +502,21 @@ def mirror_database(
                 continue
 
             if source_id in mappings:
-                update_page_in_mirror(mappings[source_id], props, icon=icon)
-                updated += 1
+                try:
+                    update_page_in_mirror(mappings[source_id], props, icon=icon)
+                    updated += 1
+                except Exception as e:
+                    msg = str(e).lower()
+            
+                    # Se o item do espelho foi arquivado/apagado/inacessível, recria e corrige o mapping
+                    if ("can't edit block that is archived" in msg) or ("archived" in msg) or ("object_not_found" in msg):
+                        old = mappings.get(source_id)
+                        print(f"♻️  [{name}] mapping inválido (mirror_id={old}). Recriando item no espelho...")
+                        mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
+                        mappings[source_id] = mirror_id
+                        created += 1
+                    else:
+                        raise
             else:
                 mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
                 mappings[source_id] = mirror_id
