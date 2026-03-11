@@ -198,7 +198,7 @@ def load_holidays_set(start, end):
             else:
                 holidays.add(start_d)
 
-    except Exception as e:
+    except Exception:
         debug("⚠️ Falha ao carregar feriados, seguindo sem bloqueio.")
         traceback.print_exc()
 
@@ -225,6 +225,101 @@ def sanitize_title(title):
 def get_title(props):
     title = props.get("Evento", {}).get("title", [])
     return title[0]["plain_text"] if title else "(sem título)"
+
+
+# ==========================
+# NORMALIZAÇÃO DE PROPRIEDADES
+# ==========================
+def truncate_text_content(text, limit=2000):
+    if text is None:
+        return ""
+    return text[:limit]
+
+
+def normalize_rich_text_array(items):
+    normalized = []
+
+    for item in items or []:
+        if item.get("type") != "text":
+            continue
+
+        text_obj = item.get("text", {}) or {}
+        content = truncate_text_content(text_obj.get("content", ""))
+        link = text_obj.get("link")
+
+        if not content:
+            continue
+
+        normalized.append({
+            "type": "text",
+            "text": {
+                "content": content,
+                "link": link
+            }
+        })
+
+    return normalized
+
+
+def normalize_property_for_create(prop):
+    ptype = prop["type"]
+    value = prop.get(ptype)
+
+    if value is None:
+        return None
+
+    if ptype == "people":
+        people_ids = [{"id": p["id"]} for p in value if p.get("id")]
+        return {"people": people_ids}
+
+    if ptype == "relation":
+        rel_ids = [{"id": r["id"]} for r in value if r.get("id")]
+        return {"relation": rel_ids}
+
+    if ptype == "files":
+        files_payload = []
+        for f in value:
+            if f.get("type") == "external":
+                external = f.get("external", {}) or {}
+                url = external.get("url")
+                if url:
+                    files_payload.append({
+                        "name": f.get("name", "arquivo"),
+                        "external": {"url": url}
+                    })
+        return {"files": files_payload}
+
+    if ptype == "rich_text":
+        return {"rich_text": normalize_rich_text_array(value)}
+
+    if ptype == "title":
+        return {"title": normalize_rich_text_array(value)}
+
+    if ptype == "number":
+        return {"number": value}
+
+    if ptype == "select":
+        return {"select": value}
+
+    if ptype == "multi_select":
+        return {"multi_select": value}
+
+    if ptype == "date":
+        return {"date": value}
+
+    if ptype == "checkbox":
+        return {"checkbox": value}
+
+    if ptype == "url":
+        return {"url": value}
+
+    if ptype == "email":
+        return {"email": value}
+
+    if ptype == "phone_number":
+        return {"phone_number": value}
+
+    return None
 
 
 # ==========================
@@ -261,7 +356,16 @@ def create_instance(base_meeting, target_date):
         return
 
     new_props = {
-        "Evento": {"title": [{"text": {"content": f"{RECURRING_EMOJI} {title}"}}]},
+        "Evento": {
+            "title": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": truncate_text_content(f"{RECURRING_EMOJI} {title}")
+                    }
+                }
+            ]
+        },
         "Data": {"date": date_payload},
         "Reuniões relacionadas (recorrência)": {"relation": [{"id": base_id}]},
         "Recorrência": {"select": None},
@@ -270,9 +374,10 @@ def create_instance(base_meeting, target_date):
     for k, v in props.items():
         if k in new_props or v["type"] not in CREATABLE_PROP_TYPES:
             continue
-        content = v.get(v["type"])
-        if content is not None:
-            new_props[k] = {v["type"]: content}
+
+        normalized = normalize_property_for_create(v)
+        if normalized is not None:
+            new_props[k] = normalized
 
     payload = {
         "parent": {"database_id": DATABASE_ID_REUNIOES},
@@ -348,7 +453,12 @@ def main():
         r = m["properties"].get("Recorrência", {}).get("select")
         if not r:
             continue
-        base = normalize_notion_date(m["properties"]["Data"]["date"]["start"])
+
+        date_prop = m["properties"].get("Data", {}).get("date")
+        if not date_prop or not date_prop.get("start"):
+            continue
+
+        base = normalize_notion_date(date_prop["start"])
         if base:
             window_start = min(window_start, base)
             window_end = max(window_end, base + relativedelta(months=MAX_MONTHS))
@@ -361,7 +471,16 @@ def main():
         if not r:
             continue
 
-        base = normalize_notion_date(m["properties"]["Data"]["date"]["start"])
+        date_prop = m["properties"].get("Data", {}).get("date")
+        if not date_prop or not date_prop.get("start"):
+            debug(f"⚠️ Reunião sem Data.start, pulando | id={m.get('id')}")
+            continue
+
+        base = normalize_notion_date(date_prop["start"])
+        if not base:
+            debug(f"⚠️ Não foi possível normalizar a data da reunião | id={m.get('id')}")
+            continue
+
         rec = r["name"].lower()
 
         if rec == "diária":
