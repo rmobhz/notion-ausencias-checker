@@ -254,10 +254,10 @@ def create_instance(base_meeting, target_date):
     base_id = base_meeting["id"]
 
     title = sanitize_title(get_title(props))
-
     date_payload = build_date_payload_from_base(base_meeting, target_date)
 
     if instance_exists(base_id, date_payload["start"][:10]):
+        debug(f"⏭️ Já existe instância: {title} → {date_payload['start'][:10]}")
         return
 
     new_props = {
@@ -271,12 +271,33 @@ def create_instance(base_meeting, target_date):
         if k in new_props or v["type"] not in CREATABLE_PROP_TYPES:
             continue
         content = v.get(v["type"])
-        if content:
+        if content is not None:
             new_props[k] = {v["type"]: content}
 
-    payload = {"parent": {"database_id": DATABASE_ID_REUNIOES}, "properties": new_props}
-    requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
-    debug(f"✅ Criada: {title} → {date_payload['start']}")
+    payload = {
+        "parent": {"database_id": DATABASE_ID_REUNIOES},
+        "properties": new_props
+    }
+
+    try:
+        r = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers=HEADERS,
+            json=payload
+        )
+
+        if r.status_code >= 400:
+            debug(f"❌ Erro ao criar: {title} → {date_payload['start']}")
+            debug(f"Status: {r.status_code}")
+            debug(r.text)
+            return
+
+        data = r.json()
+        debug(f"✅ Criada: {title} → {date_payload['start']} | page_id={data.get('id')}")
+
+    except Exception:
+        debug(f"❌ Exceção ao criar: {title} → {date_payload['start']}")
+        traceback.print_exc()
 
 
 # ==========================
