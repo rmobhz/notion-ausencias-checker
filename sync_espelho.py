@@ -773,6 +773,7 @@ def main() -> None:
                 "Status",
                 "Formato",
                 "Editoria",
+                "Collab",
                 "Links do post",
                 "Origem",
             ],
