@@ -9,7 +9,7 @@ import traceback
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 DATABASE_ID_REUNIOES = os.getenv("DATABASE_ID_REUNIOES")
 
-# 🧮 Limites
+# 🧮 Limites padrão (usados quando "Repetir até" não estiver preenchida)
 LIMIT_DAYS = 30
 MAX_MONTHS = 12
 BIWEEKLY_MONTHS = 6
@@ -228,6 +228,23 @@ def get_title(props):
 
 
 # ==========================
+# "REPETIR ATÉ" — DATA FINAL
+# ==========================
+def get_repeat_until(props):
+    """
+    Lê a propriedade de data "Repetir até" da reunião-mãe.
+    Retorna um datetime.date ou None se não preenchida.
+
+    No Notion, crie uma propriedade do tipo Date com o nome exato "Repetir até"
+    na mesma base de dados. Deixe em branco para usar os limites padrão do script.
+    """
+    date_prop = props.get("Repetir até", {}).get("date")
+    if not date_prop or not date_prop.get("start"):
+        return None
+    return normalize_notion_date(date_prop["start"])
+
+
+# ==========================
 # NORMALIZAÇÃO DE PROPRIEDADES
 # ==========================
 def truncate_text_content(text, limit=2000):
@@ -372,7 +389,8 @@ def create_instance(base_meeting, target_date):
     }
 
     for k, v in props.items():
-        if k in new_props or v["type"] not in CREATABLE_PROP_TYPES:
+        # Não copia "Repetir até" para as instâncias filhas
+        if k in new_props or k == "Repetir até" or v["type"] not in CREATABLE_PROP_TYPES:
             continue
 
         normalized = normalize_property_for_create(v)
@@ -408,30 +426,58 @@ def create_instance(base_meeting, target_date):
 # ==========================
 # GERADORES
 # ==========================
-def generate_daily(m, base):
-    for i in range(1, LIMIT_DAYS + 1):
-        d = base + datetime.timedelta(days=i)
+def generate_daily(m, base, until=None):
+    """
+    Gera ocorrências diárias (dias úteis).
+    Se "Repetir até" estiver preenchida, usa essa data como teto.
+    Caso contrário, usa o limite padrão de LIMIT_DAYS dias.
+    """
+    limit = until if until else base + datetime.timedelta(days=LIMIT_DAYS)
+
+    d = base + datetime.timedelta(days=1)
+    while d <= limit:
         if d.weekday() < 5:
             create_instance(m, d)
+        d += datetime.timedelta(days=1)
 
 
-def generate_weekly(m, base):
+def generate_weekly(m, base, until=None):
+    """
+    Gera ocorrências semanais.
+    Se "Repetir até" estiver preenchida, usa essa data como teto.
+    Caso contrário, usa o limite padrão de 4 semanas.
+    """
+    limit = until if until else base + datetime.timedelta(weeks=4)
+
     d = base + datetime.timedelta(weeks=1)
-    for _ in range(4):
+    while d <= limit:
         create_instance(m, d)
         d += datetime.timedelta(weeks=1)
 
 
-def generate_monthly(m, base):
+def generate_monthly(m, base, until=None):
+    """
+    Gera ocorrências mensais.
+    Se "Repetir até" estiver preenchida, usa essa data como teto.
+    Caso contrário, usa o limite padrão de MAX_MONTHS meses.
+    """
+    limit = until if until else base + relativedelta(months=MAX_MONTHS)
+
     d = base + relativedelta(months=1)
-    for _ in range(MAX_MONTHS):
+    while d <= limit:
         create_instance(m, d)
         d += relativedelta(months=1)
 
 
-def generate_biweekly(m, base):
+def generate_biweekly(m, base, until=None):
+    """
+    Gera ocorrências quinzenais.
+    Se "Repetir até" estiver preenchida, usa essa data como teto.
+    Caso contrário, usa o limite padrão de BIWEEKLY_MONTHS meses.
+    """
+    limit = until if until else base + relativedelta(months=BIWEEKLY_MONTHS)
+
     d = base + datetime.timedelta(weeks=2)
-    limit = base + relativedelta(months=BIWEEKLY_MONTHS)
     while d <= limit:
         create_instance(m, d)
         d += datetime.timedelta(weeks=2)
@@ -459,9 +505,14 @@ def main():
             continue
 
         base = normalize_notion_date(date_prop["start"])
+        until = get_repeat_until(m["properties"])
+
         if base:
             window_start = min(window_start, base)
-            window_end = max(window_end, base + relativedelta(months=MAX_MONTHS))
+            # Usa "Repetir até" como teto da janela, se preenchida
+            default_end = base + relativedelta(months=MAX_MONTHS)
+            effective_end = min(default_end, until) if until else default_end
+            window_end = max(window_end, effective_end)
 
     HOLIDAYS_SET = load_holidays_set(window_start, window_end)
     debug(f"🎉 Feriados carregados: {len(HOLIDAYS_SET)}")
@@ -481,16 +532,20 @@ def main():
             debug(f"⚠️ Não foi possível normalizar a data da reunião | id={m.get('id')}")
             continue
 
+        until = get_repeat_until(m["properties"])
+        if until:
+            debug(f"📅 Repetir até: {until}")
+
         rec = r["name"].lower()
 
         if rec == "diária":
-            generate_daily(m, base)
+            generate_daily(m, base, until)
         elif rec == "semanal":
-            generate_weekly(m, base)
+            generate_weekly(m, base, until)
         elif rec == "mensal":
-            generate_monthly(m, base)
+            generate_monthly(m, base, until)
         elif rec in ("quinzenal", "quinzenais"):
-            generate_biweekly(m, base)
+            generate_biweekly(m, base, until)
 
 
 if __name__ == "__main__":
