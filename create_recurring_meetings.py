@@ -14,6 +14,9 @@ LIMIT_DAYS = 30
 MAX_MONTHS = 12
 BIWEEKLY_MONTHS = 6
 
+# 🛡️ Teto absoluto para séries diárias (evita explosão de chamadas à API)
+MAX_LIMIT_DAYS = 365
+
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API_KEY}",
     "Notion-Version": "2022-06-28",
@@ -431,8 +434,11 @@ def generate_daily(m, base, until=None):
     Gera ocorrências diárias (dias úteis).
     Se "Repetir até" estiver preenchida, usa essa data como teto.
     Caso contrário, usa o limite padrão de LIMIT_DAYS dias.
+    Em qualquer caso, nunca ultrapassa MAX_LIMIT_DAYS para evitar
+    explosão de chamadas à API do Notion.
     """
-    limit = until if until else base + datetime.timedelta(days=LIMIT_DAYS)
+    raw_limit = until if until else base + datetime.timedelta(days=LIMIT_DAYS)
+    limit = min(raw_limit, base + datetime.timedelta(days=MAX_LIMIT_DAYS))
 
     d = base + datetime.timedelta(days=1)
     while d <= limit:
@@ -511,7 +517,7 @@ def main():
             window_start = min(window_start, base)
             # Usa "Repetir até" como teto da janela, se preenchida
             default_end = base + relativedelta(months=MAX_MONTHS)
-            effective_end = min(default_end, until) if until else default_end
+            effective_end = until if until else default_end
             window_end = max(window_end, effective_end)
 
     HOLIDAYS_SET = load_holidays_set(window_start, window_end)
