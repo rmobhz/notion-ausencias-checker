@@ -1,0 +1,32 @@
+name: Verifica remoção de responsáveis (Notion)
+
+on:
+  schedule:
+    # a cada 10 minutos — ajuste conforme a urgência real do aviso
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}  # permite rodar manualmente pra testar
+
+jobs:
+  checar-responsaveis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Rodar checagem de responsáveis removidos
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.DATABASE_ID_CALENDARIOEDITORIAL }}
+          DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SNAPSHOT_GIST_ID: ${{ secrets.SNAPSHOT_GIST_ID }}
+          GH_TOKEN_GIST: ${{ secrets.GH_TOKEN_GIST }}
+        run: python check_responsaveis.py
