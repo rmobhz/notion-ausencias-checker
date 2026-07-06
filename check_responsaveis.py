@@ -160,7 +160,10 @@ def notificar_remocao_slack(slack_id: str, titulo: str, papel: str, url_pagina: 
     """Envia uma DM no Slack para a pessoa removida, linkando a tarefa."""
     body = {
         "channel": slack_id,
-        "text": f'Você foi removido de "{papel}" em <{url_pagina}|{titulo}>.',
+        "text": (
+            f'Opa! 👋 Notei uma mudança no Calendário Editorial: você foi removido(a) de '
+            f'*"{papel}"* em <{url_pagina}|{titulo}>.'
+        ),
     }
     resp = requests.post(
         "https://slack.com/api/chat.postMessage", headers=SLACK_HEADERS, json=body
