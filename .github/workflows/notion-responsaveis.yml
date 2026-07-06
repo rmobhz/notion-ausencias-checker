@@ -2,8 +2,7 @@ name: Verifica remoção de responsáveis (Notion)
 
 on:
   schedule:
-    # a cada 10 minutos — ajuste conforme a urgência real do aviso
-    - cron: "*/10 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch: {}  # permite rodar manualmente pra testar
 
 jobs:
