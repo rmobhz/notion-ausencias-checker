@@ -1,4 +1,4 @@
-name: Verifica remoção de responsáveis (Notion)
+name: Notion - Verifica remoção de responsáveis do Calendário Editorial
 
 on:
   schedule:
