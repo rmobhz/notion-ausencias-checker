@@ -11,7 +11,7 @@ GIST_ID = os.environ["SNAPSHOT_GIST_ID"]
 GITHUB_TOKEN = os.environ["GH_TOKEN_GIST"]  # token com escopo 'gist', separado do GITHUB_TOKEN padrão
 SNAPSHOT_FILENAME = "snapshot_responsaveis.json"
 NOTION_VERSION = "2022-06-28"  # ajuste para a versão que seu script já usa
-DIAS_A_FRENTE = 5  # janela de verificação
+DIAS_A_FRENTE = 30  # janela de verificação
 NOME_PROPRIEDADE_DATA = "Veiculação"
 
 # As 3 propriedades tipo Pessoa a monitorar no Calendário Editorial
