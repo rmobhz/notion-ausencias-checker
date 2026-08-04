@@ -46,6 +46,10 @@ DATE_FROM = "2026-01-01"
 # Retry para instabilidades (Cloudflare/Notion)
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
+# --- CORREÇÃO: a cada quantos itens o progresso é impresso no console.
+# (o SALVAMENTO do estado agora acontece a cada item, não mais só aqui.)
+PROGRESS_LOG_EVERY = 25
+
 
 # =========================
 # HTTP helpers (com retry)
@@ -488,6 +492,25 @@ def query_database_pages(
     return results
 
 
+# --- CORREÇÃO: rede de segurança contra estado local perdido/desatualizado.
+# Antes de criar uma página nova, confere no PRÓPRIO Notion (via relação
+# "Origem") se já existe uma página no espelho para esse source_id. Se
+# existir, reaproveita em vez de criar uma duplicata.
+def find_mirror_page_by_origin(mirror_db_id: str, origem_prop: str, source_id: str) -> Optional[str]:
+    url = f"{BASE_URL}/databases/{mirror_db_id}/query"
+    payload = {
+        "filter": {"property": origem_prop, "relation": {"contains": source_id}},
+        "page_size": 5,
+    }
+    data = http_post(url, payload)
+    results = data.get("results", [])
+    if not results:
+        return None
+    # Se por acaso já existir mais de uma (duplicata anterior), usa a mais recente
+    results.sort(key=lambda p: p.get("last_edited_time", ""), reverse=True)
+    return results[0]["id"]
+
+
 # =========================
 # Upsert (com icon) + archived toggle
 # =========================
@@ -574,77 +597,119 @@ def mirror_database(
 
     created = 0
     updated = 0
+    recovered = 0
     skipped_archived = 0
     errors = 0
 
     # Para reconciliação (FULL): ids de origem vistos nesta execução
-    seen_source_ids: set[str] = set()
+    seen_source_ids: set = set()
 
-    for i, page in enumerate(pages, start=1):
-        source_id = page["id"]
-        seen_source_ids.add(source_id)
+    # --- CORREÇÃO: try/finally garante que o estado seja salvo mesmo se o
+    # processo for interrompido no meio do loop (exceção não prevista,
+    # timeout externo, etc.) — evita perder mappings de itens já criados.
+    try:
+        for i, page in enumerate(pages, start=1):
+            source_id = page["id"]
+            seen_source_ids.add(source_id)
 
-        if is_archived(page) and not MIRROR_UPDATE_ARCHIVED:
-            skipped_archived += 1
-            continue
-
-        try:
-            props = build_dest_properties(
-                page,
-                include_only_props=include_only_props,
-                mirror_db_schema=mirror_schema,
-                force_origin_relation_prop=force_origin_relation_prop,
-            )
-
-            icon = sanitize_icon(page.get("icon"))
-
-            if MIRROR_DRY_RUN:
+            if is_archived(page) and not MIRROR_UPDATE_ARCHIVED:
+                skipped_archived += 1
                 continue
 
-            if source_id in mappings:
-                mirror_id = mappings[source_id]
-                try:
-                    # Se o item do espelho estiver arquivado, desarquiva antes de atualizar
-                    update_page_in_mirror(mirror_id, props, icon=icon)
-                    updated += 1
+            try:
+                props = build_dest_properties(
+                    page,
+                    include_only_props=include_only_props,
+                    mirror_db_schema=mirror_schema,
+                    force_origin_relation_prop=force_origin_relation_prop,
+                )
 
-                except Exception as e:
-                    msg = str(e).lower()
+                icon = sanitize_icon(page.get("icon"))
 
-                    # Caso típico: mirror arquivado -> desarquiva e tenta novamente
-                    if ("can't edit block that is archived" in msg) or ("archived" in msg):
-                        set_page_archived(mirror_id, False)
+                if MIRROR_DRY_RUN:
+                    continue
+
+                if source_id in mappings:
+                    mirror_id = mappings[source_id]
+                    try:
                         update_page_in_mirror(mirror_id, props, icon=icon)
                         updated += 1
 
-                    # Se o item não existe mais (apagado), recria e corrige mapping
-                    elif ("object_not_found" in msg):
-                        print(f"♻️  [{name}] mapping inválido (mirror_id={mirror_id}). Recriando item no espelho...")
-                        new_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
-                        mappings[source_id] = new_id
+                    except Exception as e:
+                        msg = str(e).lower()
+
+                        if ("can't edit block that is archived" in msg) or ("archived" in msg):
+                            set_page_archived(mirror_id, False)
+                            update_page_in_mirror(mirror_id, props, icon=icon)
+                            updated += 1
+
+                        elif "object_not_found" in msg:
+                            print(f"♻️  [{name}] mapping inválido (mirror_id={mirror_id}). Recriando item no espelho...")
+                            new_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
+                            mappings[source_id] = new_id
+                            created += 1
+
+                        else:
+                            raise
+
+                else:
+                    # --- CORREÇÃO: antes de criar, confere no Notion (via Origem)
+                    # se essa página já existe no espelho — protege contra
+                    # perda/atraso do arquivo de estado local.
+                    recovered_id = None
+                    if force_origin_relation_prop:
+                        try:
+                            recovered_id = find_mirror_page_by_origin(
+                                mirror_db_id, force_origin_relation_prop, source_id
+                            )
+                        except Exception as e:
+                            print(f"⚠️  [{name}] falha ao checar duplicata via Origem (source_id={source_id}): {e}")
+
+                    if recovered_id:
+                        print(
+                            f"♻️  [{name}] mapping local ausente, mas já existe no espelho "
+                            f"(mirror_id={recovered_id}) para source_id={source_id}. Reaproveitando."
+                        )
+                        mappings[source_id] = recovered_id
+                        try:
+                            update_page_in_mirror(recovered_id, props, icon=icon)
+                        except Exception as e:
+                            msg = str(e).lower()
+                            if "archived" in msg:
+                                set_page_archived(recovered_id, False)
+                                update_page_in_mirror(recovered_id, props, icon=icon)
+                            else:
+                                raise
+                        recovered += 1
+                    else:
+                        mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
+                        mappings[source_id] = mirror_id
                         created += 1
 
-                    else:
-                        raise
+                # --- CORREÇÃO: salva o estado a cada item processado (não mais
+                # só a cada 25), para minimizar o que se perde numa interrupção.
+                if not MIRROR_DRY_RUN:
+                    state["mappings"] = mappings
+                    save_state(name, state)
 
-            else:
-                mirror_id = create_page_in_mirror(mirror_db_id, props, icon=icon)
-                mappings[source_id] = mirror_id
-                created += 1
+                if i % PROGRESS_LOG_EVERY == 0:
+                    print(
+                        f"  ... [{name}] {i}/{len(pages)} "
+                        f"(Criados={created} | Atualizados={updated} | Recuperados={recovered} "
+                        f"| SkippedArchived={skipped_archived} | Erros={errors})"
+                    )
 
-            if i % 25 == 0:
-                state["mappings"] = mappings
-                save_state(name, state)
-                print(
-                    f"  ... [{name}] {i}/{len(pages)} "
-                    f"(Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors})"
-                )
+                time.sleep(SLEEP_SEC)
 
-            time.sleep(SLEEP_SEC)
+            except Exception as e:
+                errors += 1
+                print(f"❌ [{name}] erro {i}/{len(pages)} source_id={source_id}: {e}")
 
-        except Exception as e:
-            errors += 1
-            print(f"❌ [{name}] erro {i}/{len(pages)} source_id={source_id}: {e}")
+    finally:
+        # Garante persistência mesmo se algo escapar do try interno acima
+        if not MIRROR_DRY_RUN:
+            state["mappings"] = mappings
+            save_state(name, state)
 
     if MIRROR_DRY_RUN:
         print(f"✅ [{name}] DRY_RUN finalizado | Itens analisados={len(pages)} | SkippedArchived={skipped_archived} | Erros={errors}")
@@ -677,7 +742,10 @@ def mirror_database(
         state["last_sync_time"] = now_iso_z()
     save_state(name, state)
 
-    print(f"✅ [{name}] concluído | Criados={created} | Atualizados={updated} | SkippedArchived={skipped_archived} | Erros={errors}")
+    print(
+        f"✅ [{name}] concluído | Criados={created} | Atualizados={updated} | Recuperados={recovered} "
+        f"| SkippedArchived={skipped_archived} | Erros={errors}"
+    )
 
 
 # =========================
