@@ -1,0 +1,33 @@
+name: Notion - Carga de trabalho (2x/dia)
+
+on:
+  schedule:
+    - cron: "0 11,20 * * 1-5"  # 08:00 e 17:00 (BRT) em dias úteis
+  workflow_dispatch: {}
+
+concurrency:
+  group: notion-automations-carga-trabalho
+  cancel-in-progress: true
+
+jobs:
+  popular-carga-trabalho:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Popular Carga de trabalho
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          DATABASE_ID_EQUIPE_GCMD: ${{ secrets.DATABASE_ID_EQUIPE_GCMD }}
+          DATABASE_ID_TAREFAS_GCMD: ${{ secrets.DATABASE_ID_TAREFAS_GCMD }}
+          DATABASE_ID_CARGA_TRABALHO: ${{ secrets.DATABASE_ID_CARGA_TRABALHO }}
+        run: python notion_carga_trabalho.py
