@@ -21,7 +21,7 @@ STATE_DIR = ".state"
 RUN_REUNIOES = os.getenv("RUN_REUNIOES", "0").strip() == "1"
 RUN_YOUTUBE = os.getenv("RUN_YOUTUBE", "1").strip() == "1"
 RUN_CALENDARIOEDITORIAL = os.getenv("RUN_CALENDARIOEDITORIAL", "0").strip() == "1"
-RUN_TAREFAS_GCMD = os.getenv("RUN_TAREFAS_GCMD", "0").strip() == "1"
+RUN_PROJETOS_GCMD = os.getenv("RUN_PROJETOS_GCMD", "0").strip() == "1"
 RUN_CONTROLE_DEMANDAS = os.getenv("RUN_CONTROLE_DEMANDAS", "0").strip() == "1"
 
 # Segurança / teste
@@ -854,35 +854,35 @@ def main() -> None:
         print("⏭️ [Calendário Editorial] Ignorado (RUN_CALENDARIOEDITORIAL=0)")
 
     # -------------------------
-    # TAREFAS GCMD
+    # PROJETOS GCMD
     # -------------------------
-    if RUN_TAREFAS_GCMD:
-        src = require_env("DATABASE_ID_TAREFAS_GCMD")
-        dst = require_env("DATABASE_ID_TAREFAS_GCMD_ESPELHO")
+    if RUN_PROJETOS_GCMD:
+        src = require_env("DATABASE_ID_PROJETOS_GCMD")
+        dst = require_env("DATABASE_ID_PROJETOS_GCMD_ESPELHO")
 
-        src = resolve_database_id(src, "Tarefas GCMD/origem")
-        dst = resolve_database_id(dst, "Tarefas GCMD/espelho")
+        src = resolve_database_id(src, "Projetos GCMD/origem")
+        dst = resolve_database_id(dst, "Projetos GCMD/espelho")
 
         mirror_database(
-            name="Tarefas_GCMD",
+            name="Projetos_GCMD",
             source_db_id=src,
             mirror_db_id=dst,
             include_only_props=[
-                "Atividade",
+                "Projeto",
                 "Responsável",
-                "Apoio",
+                "Colaboradores",
                 "Descrição",
                 "Categoria",
                 "Status",
                 "Origem",
             ],
-            date_property_name=None,  # tarefas não são filtradas por data
+            date_property_name=None,  # projetos não são filtrados por data
             date_from=DATE_FROM,      # ignorado quando date_property_name=None
             sort_by_date=False,
             force_origin_relation_prop="Origem",
         )
     else:
-        print("⏭️ [Tarefas GCMD] Ignorado (RUN_TAREFAS_GCMD=0)")
+        print("⏭️ [Projetos GCMD] Ignorado (RUN_PROJETOS_GCMD=0)")
 
     # -------------------------
     # CONTROLE DEMANDAS
