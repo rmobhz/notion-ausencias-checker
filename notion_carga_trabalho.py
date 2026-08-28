@@ -29,7 +29,9 @@ Nomes de propriedades (ajuste aqui se algo mudar no Notion):
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -61,6 +63,8 @@ TAREFAS_PROP_RESPONSAVEL = "Responsável"           # people, na base Tarefas GC
 TAREFAS_PROP_STATUS = "Status"                     # status/select
 TAREFAS_PROP_PESO = "Peso"                          # number, formula ou rollup
 STATUS_CONCLUIDO = "Concluído"
+
+TIMEZONE = "America/Sao_Paulo"
 
 MAX_RETRIES = 3
 
@@ -218,6 +222,46 @@ def create_carga_page(equipe_page_id: str, nome: str, tarefas_abertas: int, peso
     return data["id"]
 
 
+def notion_page_url(page_id: str) -> str:
+    return f"https://www.notion.so/{page_id.replace('-', '')}"
+
+
+def update_database_description(last_run_str: str) -> None:
+    """Reescreve a descrição da base 'Carga de trabalho' com um timestamp da última execução,
+    mantendo links clicáveis para as bases de origem."""
+    payload = {
+        "description": [
+            {
+                "type": "text",
+                "text": {
+                    "content": "Dados automáticos, atualizados 2x ao dia via script externo "
+                    "a partir das bases "
+                },
+            },
+            {
+                "type": "text",
+                "text": {
+                    "content": "Equipe | GCMD",
+                    "link": {"url": notion_page_url(EQUIPE_DB_ID)},
+                },
+            },
+            {"type": "text", "text": {"content": " e "}},
+            {
+                "type": "text",
+                "text": {
+                    "content": "Tarefas GCMD",
+                    "link": {"url": notion_page_url(TAREFAS_DB_ID)},
+                },
+            },
+            {
+                "type": "text",
+                "text": {"content": f". Última atualização: {last_run_str}."},
+            },
+        ]
+    }
+    _request("PATCH", f"/databases/{CARGA_DB_ID}", json=payload)
+
+
 def main() -> int:
     print("Carregando pessoas ativas de Equipe | GCMD...")
     equipe_records = build_equipe_records()
@@ -250,6 +294,12 @@ def main() -> int:
             created += 1
 
     print(f"Concluído: {updated} atualizadas, {created} criadas, {skipped} puladas.")
+
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    last_run_str = now.strftime("%d/%m/%Y %H:%M") + " (BRT)"
+    update_database_description(last_run_str)
+    print(f"Descrição da base atualizada: última atualização {last_run_str}")
+
     return 0
 
 
