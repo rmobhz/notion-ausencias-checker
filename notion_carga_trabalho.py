@@ -298,7 +298,7 @@ def main() -> int:
     print(f"Concluído: {updated} atualizadas, {created} criadas, {skipped} puladas.")
 
     now = datetime.now(ZoneInfo(TIMEZONE))
-    last_run_str = now.strftime("%d/%m/%Y %H:%M")
+    last_run_str = now.strftime("%d/%m/%Y às %Hh%M")
     update_database_description(last_run_str)
     print(f"Descrição da base atualizada: última atualização {last_run_str}")
 
