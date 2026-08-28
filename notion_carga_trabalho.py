@@ -241,9 +241,10 @@ def update_database_description(last_run_str: str) -> None:
             {
                 "type": "text",
                 "text": {
-                    "content": "Equipe | GCMD",
+                    "content": "Equipe GCMD",
                     "link": {"url": notion_page_url(EQUIPE_DB_ID)},
                 },
+                "annotations": {"color": "brown_background"},
             },
             {"type": "text", "text": {"content": " e "}},
             {
@@ -252,10 +253,11 @@ def update_database_description(last_run_str: str) -> None:
                     "content": "Tarefas GCMD",
                     "link": {"url": notion_page_url(TAREFAS_DB_ID)},
                 },
+                "annotations": {"color": "brown_background"},
             },
             {
                 "type": "text",
-                "text": {"content": f". Última atualização: {last_run_str}."},
+                "text": {"content": f".\nÚltima atualização: {last_run_str}."},
             },
         ]
     }
