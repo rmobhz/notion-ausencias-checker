@@ -10,7 +10,15 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 GIST_ID = os.environ["SNAPSHOT_GIST_ID"]
 GITHUB_TOKEN = os.environ["GH_TOKEN_GIST"]  # token com escopo 'gist', separado do GITHUB_TOKEN padrão
 SNAPSHOT_FILENAME = "snapshot_responsaveis.json"
-NOTION_VERSION = "2022-06-28"  # ajuste para a versão que seu script já usa
+
+# A partir de 2025-09-03 o Notion separou "database" (o contêiner) de
+# "data source" (onde as linhas realmente vivem). Databases que ganharam
+# mais de uma fonte de dados passam a rejeitar consultas feitas no
+# endpoint antigo /v1/databases/{id}/query com 400 Bad Request — foi
+# exatamente isso que começou a acontecer aqui. A partir desta versão,
+# toda consulta precisa ir para /v1/data_sources/{data_source_id}/query.
+NOTION_VERSION = "2025-09-03"
+
 DIAS_A_FRENTE = 30  # janela de verificação
 NOME_PROPRIEDADE_DATA = "Veiculação"
 
@@ -32,6 +40,8 @@ SLACK_HEADERS = {
     "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
     "Content-Type": "application/json; charset=utf-8",
 }
+
+_DATA_SOURCE_CACHE: dict[str, str] = {}
 
 
 def carregar_snapshot() -> dict:
@@ -60,13 +70,41 @@ def salvar_snapshot(snapshot: dict) -> None:
     resp.raise_for_status()
 
 
-def notion_query_database(database_id: str, base_payload: dict | None = None) -> list[dict]:
-    """Query genérica com paginação — usada tanto pro calendário quanto pela equipe."""
+def obter_data_source_id(database_id: str) -> str:
+    """
+    Resolve o data_source_id de uma database (necessário desde a API
+    2025-09-03). Resultado é cacheado em memória pra não repetir a
+    chamada várias vezes na mesma execução.
+    """
+    if database_id in _DATA_SOURCE_CACHE:
+        return _DATA_SOURCE_CACHE[database_id]
+
+    resp = requests.get(
+        f"https://api.notion.com/v1/databases/{database_id}", headers=HEADERS
+    )
+    resp.raise_for_status()
+    data_sources = resp.json().get("data_sources", [])
+    if not data_sources:
+        raise RuntimeError(f"Nenhuma data source encontrada para a database {database_id}")
+    if len(data_sources) > 1:
+        nomes = ", ".join(ds.get("name", "(sem nome)") for ds in data_sources)
+        print(
+            f"Aviso: a database {database_id} tem múltiplas data sources ({nomes}); "
+            f"usando a primeira: '{data_sources[0].get('name')}'."
+        )
+
+    data_source_id = data_sources[0]["id"]
+    _DATA_SOURCE_CACHE[database_id] = data_source_id
+    return data_source_id
+
+
+def notion_query_data_source(data_source_id: str, base_payload: dict | None = None) -> list[dict]:
+    """Query genérica com paginação sobre uma data source."""
     paginas = []
     payload = dict(base_payload or {})
     while True:
         resp = requests.post(
-            f"https://api.notion.com/v1/databases/{database_id}/query",
+            f"https://api.notion.com/v1/data_sources/{data_source_id}/query",
             headers=HEADERS,
             json=payload,
         )
@@ -102,7 +140,8 @@ def buscar_paginas_calendario() -> list[dict]:
             ]
         }
     }
-    return notion_query_database(DATABASE_ID, payload)
+    data_source_id = obter_data_source_id(DATABASE_ID)
+    return notion_query_data_source(data_source_id, payload)
 
 
 def extrair_pessoas_por_papel(pagina: dict) -> dict[str, list[str]]:
@@ -116,10 +155,11 @@ def extrair_pessoas_por_papel(pagina: dict) -> dict[str, list[str]]:
 
 
 # =========================
-# EQUIPE | GCMD (People -> email) — adaptado do script de recorrência
+# EQUIPE | GCMD (People -> email)
 # =========================
 def load_team_user_map() -> dict[str, str]:
-    pages = notion_query_database(DATABASE_ID_EQUIPE_GCMD, {"page_size": 100})
+    data_source_id = obter_data_source_id(DATABASE_ID_EQUIPE_GCMD)
+    pages = notion_query_data_source(data_source_id, {"page_size": 100})
     user_map = {}
     for p in pages:
         people_prop = p.get("properties", {}).get("Usuário no Notion")
