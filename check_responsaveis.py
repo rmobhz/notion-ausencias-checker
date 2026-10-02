@@ -44,6 +44,18 @@ SLACK_HEADERS = {
 _DATA_SOURCE_CACHE: dict[str, str] = {}
 
 
+def checar_resposta_notion(resp: requests.Response) -> None:
+    """Como raise_for_status() sozinho esconde o motivo, imprime o corpo
+    de erro que o Notion sempre devolve antes de propagar a exceção."""
+    if not resp.ok:
+        try:
+            detalhe = resp.json()
+        except ValueError:
+            detalhe = resp.text
+        print(f"Erro Notion {resp.status_code} em {resp.url}: {detalhe}")
+    resp.raise_for_status()
+
+
 def carregar_snapshot() -> dict:
     """Lê o snapshot salvo no Gist secreto (não no repositório)."""
     resp = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=GIST_HEADERS)
@@ -82,7 +94,7 @@ def obter_data_source_id(database_id: str) -> str:
     resp = requests.get(
         f"https://api.notion.com/v1/databases/{database_id}", headers=HEADERS
     )
-    resp.raise_for_status()
+    checar_resposta_notion(resp)
     data_sources = resp.json().get("data_sources", [])
     if not data_sources:
         raise RuntimeError(f"Nenhuma data source encontrada para a database {database_id}")
@@ -108,7 +120,7 @@ def notion_query_data_source(data_source_id: str, base_payload: dict | None = No
             headers=HEADERS,
             json=payload,
         )
-        resp.raise_for_status()
+        checar_resposta_notion(resp)
         data = resp.json()
         paginas.extend(data["results"])
         if not data.get("has_more"):
