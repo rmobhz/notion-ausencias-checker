@@ -836,7 +836,7 @@ def main() -> None:
             mirror_db_id=dst,
             include_only_props=[
                 "Título",
-                "Veiculação",
+                "Veiculação inst",
                 "Plataforma",
                 "Status",
                 "Formato",
@@ -845,7 +845,7 @@ def main() -> None:
                 "Links do post",
                 "Origem",
             ],
-            date_property_name="Veiculação",
+            date_property_name="Veiculação inst",
             date_from=DATE_FROM,
             sort_by_date=True,
             force_origin_relation_prop="Origem",
