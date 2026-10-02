@@ -20,7 +20,7 @@ SNAPSHOT_FILENAME = "snapshot_responsaveis.json"
 NOTION_VERSION = "2025-09-03"
 
 DIAS_A_FRENTE = 30  # janela de verificação
-NOME_PROPRIEDADE_DATA = "Veiculação"
+NOME_PROPRIEDADE_DATA = "Veiculação inst"
 
 # As 3 propriedades tipo Pessoa a monitorar no Calendário Editorial
 PROPRIEDADES_PESSOAS = ["Responsável", "Apoio", "Editor(a) imagem/vídeo"]
@@ -129,6 +129,34 @@ def notion_query_data_source(data_source_id: str, base_payload: dict | None = No
     return paginas
 
 
+def obter_schema_data_source(data_source_id: str) -> dict:
+    resp = requests.get(
+        f"https://api.notion.com/v1/data_sources/{data_source_id}", headers=HEADERS
+    )
+    checar_resposta_notion(resp)
+    return resp.json().get("properties", {})
+
+
+def validar_propriedades(data_source_id: str, nomes_esperados: list[str]) -> None:
+    """
+    Confere, antes de consultar, que todas as propriedades esperadas ainda
+    existem com esse nome exato na data source. Evita tanto o 400 (query
+    com filtro numa propriedade inexistente) quanto um problema mais sutil:
+    se uma das PROPRIEDADES_PESSOAS for renomeada, o código original não
+    quebraria — ele simplesmente leria "ninguém está nesse papel" pra toda
+    página, e isso dispararia notificação de remoção falsa para todo mundo
+    que estava lá antes da renomeação. Melhor falhar alto e claro aqui.
+    """
+    schema = obter_schema_data_source(data_source_id)
+    faltando = [n for n in nomes_esperados if n not in schema]
+    if faltando:
+        disponiveis = ", ".join(sorted(schema.keys()))
+        raise RuntimeError(
+            f"Propriedade(s) não encontrada(s) na data source {data_source_id}: "
+            f"{faltando}. Disponíveis: {disponiveis}"
+        )
+
+
 def buscar_paginas_calendario() -> list[dict]:
     """
     Busca páginas do Calendário Editorial cuja 'Veiculação' esteja entre
@@ -234,6 +262,11 @@ def titulo_da_pagina(pagina: dict) -> str:
 
 
 def main() -> None:
+    data_source_calendario = obter_data_source_id(DATABASE_ID)
+    validar_propriedades(
+        data_source_calendario, [NOME_PROPRIEDADE_DATA] + PROPRIEDADES_PESSOAS
+    )
+
     snapshot_antigo = carregar_snapshot()
     snapshot_novo = {}
 
