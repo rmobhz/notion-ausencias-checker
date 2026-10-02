@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import date, timedelta
 import requests
 
@@ -197,10 +198,20 @@ def extrair_pessoas_por_papel(pagina: dict) -> dict[str, list[str]]:
 # =========================
 # EQUIPE | GCMD (People -> email)
 # =========================
-def load_team_user_map() -> dict[str, str]:
+def extrair_emails(email_bruto: str) -> list[str]:
+    """
+    Algumas pessoas têm mais de um e-mail cadastrado no mesmo campo
+    'E-mail' (ex: 'furtado@almg.gov.br, raquel.furtado@almg.gov.br').
+    Separa por vírgula ou ponto-e-vírgula e devolve cada candidato.
+    """
+    partes = re.split(r"[;,]", email_bruto)
+    return [p.strip().lower() for p in partes if p.strip()]
+
+
+def load_team_user_map() -> dict[str, list[str]]:
     data_source_id = obter_data_source_id(DATABASE_ID_EQUIPE_GCMD)
     pages = notion_query_data_source(data_source_id, {"page_size": 100})
-    user_map = {}
+    user_map: dict[str, list[str]] = {}
     for p in pages:
         people_prop = p.get("properties", {}).get("Usuário no Notion")
         email_prop = p.get("properties", {}).get("E-mail")
@@ -208,13 +219,16 @@ def load_team_user_map() -> dict[str, str]:
             continue
         if not email_prop or email_prop.get("type") != "email":
             continue
-        email = email_prop.get("email")
-        if not email:
+        email_bruto = email_prop.get("email")
+        if not email_bruto:
+            continue
+        emails = extrair_emails(email_bruto)
+        if not emails:
             continue
         for person in people_prop.get("people", []):
             uid = person.get("id")
             if uid:
-                user_map[uid] = email.lower()
+                user_map[uid] = emails
     return user_map
 
 
@@ -289,16 +303,25 @@ def main() -> None:
                 titulo = titulo_da_pagina(pagina)
 
             for user_id in removidos:
-                email = notion_para_email.get(user_id)
-                if not email:
+                emails_candidatos = notion_para_email.get(user_id)
+                if not emails_candidatos:
                     print(f"Sem e-mail mapeado para usuário Notion {user_id} — pulando aviso.")
                     continue
-                slack_id = resolver_slack_id(email, cache_slack)
+
+                slack_id = None
+                for email in emails_candidatos:
+                    slack_id = resolver_slack_id(email, cache_slack)
+                    if slack_id:
+                        break
+
                 if not slack_id:
-                    print(f"Sem Slack ID para {email} — pulando aviso.")
+                    print(
+                        f"Nenhum e-mail entre {emails_candidatos} resolveu no Slack — pulando aviso."
+                    )
                     continue
+
                 notificar_remocao_slack(slack_id, titulo, papel, pagina["url"])
-                print(f"Notificado via Slack: '{titulo}' / {papel} -> {email}")
+                print(f"Notificado via Slack: '{titulo}' / {papel} -> {slack_id}")
 
         snapshot_novo[page_id] = atual
 
